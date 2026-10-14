@@ -315,6 +315,8 @@ extern "C" {
 
     pub fn baseRT_get_config(model: baseRT_model_t) -> BaseRTModelConfig;
     pub fn baseRT_model_config_sizeof() -> usize;
+    /// The library's BASERT_ABI_VERSION (since 0.3.1).
+    pub fn baseRT_abi_version() -> std::os::raw::c_uint;
     pub fn baseRT_model_memory(model: baseRT_model_t) -> usize;
     /// Device memory budget in bytes (Metal: recommended working set; CUDA:
     /// total device memory). 0 when no supported device is present.

@@ -6,6 +6,12 @@ use std::sync::{Mutex, OnceLock};
 
 pub const BUILT_FOR: &str = env!("SUPERFLUID_BASERT_HEADER_VERSION");
 
+/// The engine ABI number the headers superfluid was built against promise
+/// (`BASERT_ABI_VERSION`, since baseRT 0.3.1); `None` for an older header.
+pub fn abi_built_for() -> Option<u32> {
+    env!("SUPERFLUID_BASERT_ABI").parse().ok()
+}
+
 macro_rules! library_api {
     ($table:ident, $field:ident; $( fn $name:ident ( $($arg:ident : $ty:ty),* $(,)? ) $(-> $ret:ty)? ; )* ) => {
         #[allow(non_snake_case)]
@@ -171,6 +177,9 @@ pub(crate) struct Loaded {
 pub struct Library {
     pub path: PathBuf,
     pub version: String,
+    /// The library's engine ABI number (`baseRT_abi_version()`), which a
+    /// library older than 0.3.1 does not state.
+    pub abi: Option<u32>,
 }
 
 static LOADED: OnceLock<Result<Loaded, String>> = OnceLock::new();
@@ -294,15 +303,36 @@ fn open_at(path: &Path) -> Result<Loaded, String> {
             CStr::from_ptr(p).to_string_lossy().into_owned()
         }
     };
-    if !same_minor(&version, BUILT_FOR) {
-        return Err(format!(
-            "libbaseRT at {} is {version}; this superfluid was built for {BUILT_FOR} (a different minor version may change the ABI)",
-            path.display()
-        ));
+    // SAFETY: a query with no arguments, on a library that exports it
+    // (0.3.1 and later); an older library has no such symbol.
+    let abi: Option<u32> = unsafe { lib.get::<unsafe extern "C" fn() -> std::os::raw::c_uint>(b"baseRT_abi_version\0") }
+        .ok()
+        .map(|f| unsafe { f() });
+    if let Err(why) = compatible(abi, abi_built_for(), &version) {
+        return Err(format!("libbaseRT at {} {why}", path.display()));
     }
     // SAFETY: a query with no arguments.
     same_config_layout(unsafe { (sys.baseRT_model_config_sizeof)() }, &version, path)?;
-    Ok(Loaded { _lib: lib, sys, tick, info: Library { path: path.to_path_buf(), version } })
+    Ok(Loaded { _lib: lib, sys, tick, info: Library { path: path.to_path_buf(), version, abi } })
+}
+
+/// Whether a library can be driven through these bindings. With an ABI
+/// number on both sides (a library of baseRT 0.3.1 or later, and a
+/// superfluid built against such a header) the numbers decide, whatever the
+/// versions say: that is what the number promises. Otherwise the major.minor
+/// must match, as every library before 0.3.1 was judged.
+pub(crate) fn compatible(have: Option<u32>, want: Option<u32>, version: &str) -> Result<(), String> {
+    match (have, want) {
+        (Some(h), Some(w)) if h == w => Ok(()),
+        (Some(h), Some(w)) => Err(format!(
+            "({version}) has engine ABI {h}; this superfluid was built for ABI {w} (baseRT {BUILT_FOR})"
+        )),
+        _ if same_minor(version, BUILT_FOR) => Ok(()),
+        _ => Err(format!(
+            "is {version}; this superfluid was built for {BUILT_FOR} (a different minor version may change the ABI{})",
+            if want.is_some() { "; a library of 0.3.1 or later states its ABI number and is judged by it" } else { "" }
+        )),
+    }
 }
 
 fn same_config_layout(theirs: usize, version: &str, path: &Path) -> Result<(), String> {
@@ -371,6 +401,23 @@ mod tests {
         assert_eq!(chosen.unwrap(), versioned, "the versioned name, where it is the one there");
         assert!(is_file, "a file is the library itself");
         assert_eq!(pick(&file, is_file).unwrap(), &missing, "opened as named, missing or not");
+    }
+
+    #[test]
+    fn the_abi_number_decides_when_both_sides_have_one_else_the_minor_does() {
+        assert_eq!(compatible(Some(1), Some(1), "99.0.0"), Ok(()), "the number outranks the version");
+        let e = compatible(Some(2), Some(1), "0.3.4").unwrap_err();
+        assert!(e.starts_with("(0.3.4) has engine ABI 2; this superfluid was built for ABI 1 (baseRT "), "{e}");
+        // A library without the number (0.3.0 and older), or a superfluid
+        // built against a header without it: the minor decides, as before.
+        assert_eq!(compatible(None, Some(1), BUILT_FOR), Ok(()));
+        assert_eq!(compatible(Some(1), None, BUILT_FOR), Ok(()));
+        assert_eq!(compatible(None, None, BUILT_FOR), Ok(()));
+        let e = compatible(None, Some(1), "99.0.0").unwrap_err();
+        assert!(e.starts_with("is 99.0.0; this superfluid was built for "), "{e}");
+        assert!(e.ends_with("states its ABI number and is judged by it)"), "{e}");
+        let e = compatible(None, None, "99.0.0").unwrap_err();
+        assert!(e.ends_with("(a different minor version may change the ABI)"), "{e}");
     }
 
     #[test]

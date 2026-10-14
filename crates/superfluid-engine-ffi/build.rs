@@ -21,6 +21,13 @@ fn main() {
         field("BASERT_VERSION_PATCH")
     );
     println!("cargo:rustc-env=SUPERFLUID_BASERT_HEADER_VERSION={version}");
+    // The engine ABI number the header promises (BASERT_ABI_VERSION, since
+    // baseRT 0.3.1); empty for a header without one.
+    let abi = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("#define BASERT_ABI_VERSION ").map(|v| v.trim().to_string()))
+        .unwrap_or_default();
+    println!("cargo:rustc-env=SUPERFLUID_BASERT_ABI={abi}");
 
     let lib_dir = env::var("BASERT_LIB_DIR")
         .or_else(|_| env::var("BASERT_LIB_PATH"))
