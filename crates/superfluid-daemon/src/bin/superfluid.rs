@@ -473,6 +473,14 @@ fn main() {
         return;
     }
     #[cfg(feature = "tui")]
+    if command == Some("compat") {
+        if args[1..].iter().any(|a| a == "--json") {
+            println!("{}", serde_json::to_string_pretty(&cli::compat_json()).expect("compat is JSON"));
+        } else {
+            print!("{}", cli::compat_text());
+        }
+        return;
+    }
     if command == Some("top") {
         top_cmd(&args[1..]);
         return;
