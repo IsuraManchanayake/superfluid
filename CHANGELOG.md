@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- A libbaseRT is judged by its engine ABI number: baseRT 0.3.1 and later state one (`baseRT_abi_version()`), and a library whose number equals the one this build was built for serves whatever its version says. A library that states none is judged by its major.minor, as before. The check at load also verifies every function and the configuration struct, as before.
+- `superfluid compat [--json]` prints what this build was built for, and each release carries the same as `compat.json` beside its tarball, so a host can choose a release before downloading it. `superfluid runtimes --json` reports a ready runtime's `abi` and, for `basert`, `requires`.
+- `superfluid serve` exits 4 when the runtime for the model is not installed or cannot run here, distinct from a usage error (2).
+- superfluid finds its workerd and adapters beside its real executable, so a symlink or a shim on `PATH` keeps the worker process.
+- [Hosting superfluid in another product](docs/serving/hosts.md) documents the contract a host builds on.
+
 ## 0.1.0
 
 First public release.
