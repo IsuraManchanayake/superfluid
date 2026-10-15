@@ -70,15 +70,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+        # The macOS leg runs on a self-hosted Apple silicon runner. The hosted
+        # macos-14 runner's virtualized GPU takes llama.cpp's fallback Metal
+        # kernels, which fail the adapter's numeric tests whatever the build,
+        # and its memory leaves the pool shared where the tests expect a
+        # buffer per lane.
+        include:
+          - os: macos
+            runner: [self-hosted, macOS, ARM64]
+          - os: ubuntu-24.04
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
     steps:
       - uses: actions/checkout@v4
+      # A self-hosted runner keeps the toolchain it has, where rustup puts it;
+      # its PATH does not say so unless its owner's shell did.
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
+      - if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # Never on a self-hosted runner: its save step deletes every file in
+      # ~/.cargo/bin that cargo did not install during the job, rustup
+      # included. A self-hosted runner keeps its target directory anyway.
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
 
       - name: Build the worker and plan the untested install
         id: plan
@@ -99,7 +117,11 @@ jobs:
           PLAN: ${{ steps.plan.outputs.plan }}
         run: target/debug/superfluid-worker-llamacpp install --into "$RUNNER_TEMP/llamacpp" --plan "$PLAN"
 
+      # A hosted runner starts empty and gets the model from the cache; a
+      # self-hosted one keeps the directory between jobs, and would spend
+      # minutes uploading it.
       - uses: actions/cache@v4
+        if: runner.environment == 'github-hosted'
         with:
           path: ~/.cache/superfluid-nightly/models
           key: nightly-gguf-${{ hashFiles('.github/workflows/nightly-runtimes.yml') }}
