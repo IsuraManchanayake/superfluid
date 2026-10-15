@@ -117,7 +117,11 @@ jobs:
           PLAN: ${{ steps.plan.outputs.plan }}
         run: target/debug/superfluid-worker-llamacpp install --into "$RUNNER_TEMP/llamacpp" --plan "$PLAN"
 
+      # A hosted runner starts empty and gets the model from the cache; a
+      # self-hosted one keeps the directory between jobs, and would spend
+      # minutes uploading it.
       - uses: actions/cache@v4
+        if: runner.environment == 'github-hosted'
         with:
           path: ~/.cache/superfluid-nightly/models
           key: nightly-gguf-${{ hashFiles('.github/workflows/nightly-runtimes.yml') }}
