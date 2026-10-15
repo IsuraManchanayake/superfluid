@@ -101,6 +101,38 @@ pub fn worker_args(id: RuntimeId, model: &Path, ctx: i32, max_batch: u32, kv_bit
     worker_args_from(&for_runtime(id), model, ctx, max_batch, kv_bits)
 }
 
+/// The arguments an in-process pull gets: the runtime's options alone, parsed as a worker
+/// process parses them, so the pull runs in the environment the serve will.
+pub fn pull_args(id: RuntimeId) -> Result<WorkerArgs, String> {
+    let options = for_runtime(id);
+    let argv: Vec<String> = options.iter().flat_map(|(f, v)| [f.clone(), v.clone()]).collect();
+    WorkerArgs::parse(&argv)
+}
+
+/// What the daemon's own process must carry for the libraries it loads in process: the
+/// llama.cpp tokenizer library finds libllama as the worker does, by `SUPERFLUID_LLAMA_LIB`
+/// when the command line names a library, since the worker's `--lib` never reaches it.
+pub fn daemon_environment(settled: &Settled) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for (id, options) in settled {
+        if id.base().name() == "llamacpp" {
+            if let Some((_, lib)) = options.iter().find(|(flag, _)| flag == "--lib") {
+                out.push(("SUPERFLUID_LLAMA_LIB", lib.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Sets [`daemon_environment`] on this process, before any such library is loaded.
+pub fn export_to_daemon() {
+    if let Some(all) = SET.get() {
+        for (name, value) in daemon_environment(all) {
+            std::env::set_var(name, value);
+        }
+    }
+}
+
 pub fn worker_args_from(options: &[(String, String)], model: &Path, ctx: i32, max_batch: u32, kv_bits: i32) -> Result<WorkerArgs, String> {
     let mut argv: Vec<String> = vec![
         "--model".into(),
@@ -238,6 +270,17 @@ mod tests {
         let plain = worker_args_from(&[], Path::new("/m"), 2048, 4, 8).unwrap();
         assert!(plain.venv.is_none() && plain.extra.is_empty() && plain.kv_bits == 8);
         assert!(worker_args_from(&[("--lib".to_string(), String::new())], Path::new("/m"), 1, 1, 0).is_ok(), "a value is the parser's to take; the worker judges it");
+    }
+
+    #[test]
+    fn the_daemon_carries_the_llama_cpp_library_for_its_own_tokenizer() {
+        let ids = [RuntimeId::new("llamacpp"), RuntimeId::new("mlx")];
+        let given = [resolve("--llamacpp-lib", "/custom/lib", &ids).unwrap(), resolve("--mlx-venv", "/custom/env", &ids).unwrap()];
+        assert_eq!(daemon_environment(&given_pairs(&given)), [("SUPERFLUID_LLAMA_LIB", "/custom/lib".to_string())]);
+        let other = [resolve("--llamacpp-n-gpu-layers", "20", &ids).unwrap()];
+        assert!(daemon_environment(&given_pairs(&other)).is_empty(), "only the library concerns the daemon's own process");
+        let args = WorkerArgs::parse(&["--venv".to_string(), "/custom/env".to_string()]).unwrap();
+        assert_eq!(args.venv.as_deref(), Some(Path::new("/custom/env")), "what pull_args hands an in-process pull");
     }
 
     #[test]

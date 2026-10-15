@@ -630,17 +630,9 @@ fn install_command(rt: &dyn Runtime, name: &str, args: &[String]) -> ! {
 
 fn pull_command(rt: &dyn Runtime, name: &str, args: &[String]) -> ! {
     let Some(declared) = rt.pull_options() else { fail(name, &format!("the {} runtime pulls no model by id", rt.info().id)) };
-    let (mut worker, mut pull_args) = (Vec::new(), Vec::new());
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if rt.flags().contains(&a.as_str()) {
-            worker.push(a.clone());
-            worker.extend(it.next().cloned());
-        } else {
-            pull_args.push(a.clone());
-        }
-    }
+    let (worker, pull_args) = split_pull_args(rt, args);
     let wargs = WorkerArgs::parse(&worker).unwrap_or_else(|e| usage(rt, name, &e));
+    refuse_bad_options(rt, &wargs).unwrap_or_else(|e| usage(rt, name, &e));
     let pull = Pull::parse(&pull_args, declared).unwrap_or_else(|e| usage(rt, name, &e));
     rt.prepare(&wargs);
     match rt.pull(&pull, &wargs) {
@@ -650,6 +642,24 @@ fn pull_command(rt: &dyn Runtime, name: &str, args: &[String]) -> ! {
         }
         Err(why) => fail(name, &why),
     }
+}
+
+/// A pull's command line, split into the worker's own flags and options (which
+/// set up the runtime the pull runs in: its library, its environment) and the
+/// pull's arguments.
+pub fn split_pull_args(rt: &dyn Runtime, args: &[String]) -> (Vec<String>, Vec<String>) {
+    let flags = worker_flags(rt);
+    let (mut worker, mut pull_args) = (Vec::new(), Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if flags.iter().any(|f| f == a) {
+            worker.push(a.clone());
+            worker.extend(it.next().cloned());
+        } else {
+            pull_args.push(a.clone());
+        }
+    }
+    (worker, pull_args)
 }
 
 pub fn install_into(rt: &dyn Runtime, plan: &Plan, dir: &Path) -> Result<Manifest, String> {
@@ -767,6 +777,34 @@ mod tests {
                 extra: serde_json::json!({"wheels_size": 3}),
             }]))
         }
+    }
+
+    #[test]
+    fn a_pull_takes_the_runtime_options_apart_from_its_own_arguments() {
+        struct WithOptions;
+        impl Runtime for WithOptions {
+            fn info(&self) -> RuntimeInfo {
+                RuntimeInfo { id: "opt", aliases: &[], formats: vec![], tokenizer: TokenizerSource::HuggingFace }
+            }
+            fn flags(&self) -> &'static [&'static str] {
+                &["--venv"]
+            }
+            fn options(&self) -> &'static [ServeOption] {
+                &[ServeOption { name: "lib", kind: OptionKind::Text, default: "", about: "a library" }]
+            }
+            fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
+                Err("never".into())
+            }
+            fn open(&self, _args: &WorkerArgs) -> Result<Loaded, String> {
+                Err("never".into())
+            }
+        }
+        let argv: Vec<String> = ["org/m:q4", "--lib", "/custom/lib", "--offline", "--venv", "/custom/env", "--revision", "main"].iter().map(|s| s.to_string()).collect();
+        let (worker, pull) = split_pull_args(&WithOptions, &argv);
+        assert_eq!(worker, ["--lib", "/custom/lib", "--venv", "/custom/env"], "the flag and the option both set up the runtime");
+        assert_eq!(pull, ["org/m:q4", "--offline", "--revision", "main"]);
+        let wargs = WorkerArgs::parse(&worker).unwrap();
+        assert_eq!((wargs.venv.as_deref(), option(&wargs, "lib")), (Some(Path::new("/custom/env")), Some("/custom/lib")));
     }
 
     #[test]

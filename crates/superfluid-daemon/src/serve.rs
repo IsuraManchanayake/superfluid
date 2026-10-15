@@ -570,6 +570,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
     // so an option that makes a runtime usable here counts before the runtime is required.
     // Each is checked against what the worker declares once the runtime answers.
     superfluid_daemon::runtime_options::set(superfluid_daemon::runtime_options::given_pairs(&runtime_options));
+    // The llama.cpp tokenizer this process loads finds its library the way the worker does.
+    superfluid_daemon::runtime_options::export_to_daemon();
     let sessions = Some(sessions.unwrap_or_else(|| superfluid_daemon::cli::default_sessions(catalog.home())));
     let socket = if embedding.session_socket {
         Some(socket.unwrap_or_else(|| superfluid_daemon::cli::default_socket(catalog.home(), SUN_PATH_LEN)))
