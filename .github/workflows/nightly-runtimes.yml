@@ -1,0 +1,249 @@
+name: Nightly runtimes
+
+# Each night, the newest upstream release of each runtime this superfluid
+# drives is installed untested and the adapter's tests run on it. A llama.cpp
+# build that passes is added to the adapter's recipe by a PR, with the size
+# and SHA-256 GitHub lists for each of its assets, so the next release
+# installs it on its own; a build that fails opens an issue with the run
+# attached. An MLX version is pinned by hand, wheel by wheel, so its result
+# is an issue either way. `workflow_dispatch` tests a named release instead
+# of the newest.
+#
+# A schedule fires only from the default branch. The job is a no-op for a
+# runtime whose newest release the recipe already lists.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      llamacpp:
+        description: "A llama.cpp build to test instead of the newest (bNNNN)"
+        required: false
+        default: ""
+      mlx:
+        description: "An MLX version to test instead of the newest (X.Y.Z)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: nightly-runtimes
+  cancel-in-progress: false
+
+env:
+  # A small GGUF the llama.cpp adapter's model tests run on; without one they
+  # skip, and a pass would say little.
+  TEST_GGUF_URL: https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
+
+jobs:
+  pick:
+    name: What is new upstream
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      llamacpp: ${{ steps.llamacpp.outputs.version }}
+      mlx: ${{ steps.mlx.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: llama.cpp
+        id: llamacpp
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.llamacpp }}
+        run: python3 scripts/nightly_runtimes.py llamacpp pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+      - name: MLX
+        id: mlx
+        env:
+          REQUESTED: ${{ inputs.mlx }}
+        run: python3 scripts/nightly_runtimes.py mlx pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+
+  llamacpp:
+    name: llama.cpp ${{ needs.pick.outputs.llamacpp }} on ${{ matrix.os }}
+    needs: pick
+    if: needs.pick.outputs.llamacpp != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      BUILD: ${{ needs.pick.outputs.llamacpp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the worker and plan the untested install
+        id: plan
+        run: |
+          cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+          plan=$(target/debug/superfluid-worker-llamacpp plan --version "$BUILD" --untested \
+            | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
+          {
+            echo "plan<<PLAN_EOF"
+            echo "$plan"
+            echo "PLAN_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install it
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+        run: target/debug/superfluid-worker-llamacpp install --into "$RUNNER_TEMP/llamacpp" --plan "$PLAN"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/superfluid-nightly/models
+          key: nightly-gguf-${{ hashFiles('.github/workflows/nightly-runtimes.yml') }}
+      - name: A model for the tests
+        run: |
+          mkdir -p ~/.cache/superfluid-nightly/models
+          model=~/.cache/superfluid-nightly/models/$(basename "$TEST_GGUF_URL")
+          [ -s "$model" ] || curl -fsSL --retry 3 -o "$model" "$TEST_GGUF_URL"
+          echo "SUPERFLUID_TEST_GGUF=$model" >> "$GITHUB_ENV"
+
+      - name: The adapter's tests on it
+        run: |
+          set -o pipefail
+          export SUPERFLUID_LLAMA_LIB="$RUNNER_TEMP/llamacpp/lib"
+          cargo test -p superfluid-adapter-llamacpp -- --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/llamacpp-tests.log" \
+            | python3 scripts/skip_report.py "llama.cpp adapter"
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llamacpp-${{ needs.pick.outputs.llamacpp }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/llamacpp-tests.log
+          if-no-files-found: ignore
+
+  record-llamacpp:
+    name: Record llama.cpp ${{ needs.pick.outputs.llamacpp }}
+    needs: [pick, llamacpp]
+    if: always() && needs.pick.outputs.llamacpp != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      BUILD: ${{ needs.pick.outputs.llamacpp }}
+      GH_TOKEN: ${{ github.token }}
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      BASE: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Passed, so add it to the recipe in a PR
+        if: needs.llamacpp.result == 'success'
+        run: |
+          set -euo pipefail
+          branch="nightly/llamacpp-$BUILD"
+          if [ "$(gh pr list --head "$branch" --state open --json number --jq 'length')" != 0 ]; then
+            echo "a PR from $branch is already open"
+            exit 0
+          fi
+          git switch -c "$branch"
+          GITHUB_TOKEN="$GH_TOKEN" python3 scripts/nightly_runtimes.py llamacpp append "$BUILD"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -am "llamacpp: tested with $BUILD"
+          git push -f origin "$branch"
+          p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it on macos-14 (Metal) and ubuntu-24.04 (CPU): $RUN"
+          p2="This adds the build to the adapter's recipe as a tested build, with the size and SHA-256 GitHub lists for each of its assets, so the next release installs it on its own. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
+          body="$p1"$'\n\n'"$p2"
+          gh pr create --base "$BASE" --head "$branch" --title "llamacpp: tested with $BUILD" --body "$body"
+
+      - name: Failed, so open an issue
+        if: needs.llamacpp.result != 'success'
+        run: |
+          set -euo pipefail
+          title="llama.cpp $BUILD breaks the adapter"
+          if [ "$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length')" != 0 ]; then
+            echo "an issue for $BUILD is already open"
+            exit 0
+          fi
+          p1="The nightly job installed llama.cpp $BUILD untested and the adapter's tests did not pass on it: $RUN"
+          p2="The test logs are the run's artifacts. Until the adapter is fixed, or the build is found to be at fault, the recipe keeps its last tested build. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
+          body="$p1"$'\n\n'"$p2"
+          gh issue create --title "$title" --body "$body"
+
+  mlx:
+    name: MLX ${{ needs.pick.outputs.mlx }}
+    needs: pick
+    if: needs.pick.outputs.mlx != ''
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.pick.outputs.mlx }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/superfluid-nightly/adapter-python
+          key: adapter-python-${{ hashFiles('crates/superfluid-adapters/superfluid-adapter-mlx/recipe.json') }}
+
+      - name: Build the worker as a release ships it
+        run: SUPERFLUID_ADAPTER_CACHE="$HOME/.cache/superfluid-nightly/adapter-python" bash scripts/build_runtime_adapters.sh "$RUNNER_TEMP/adapters"
+
+      - name: Install MLX untested
+        run: |
+          set -euo pipefail
+          worker="$RUNNER_TEMP/adapters/superfluid-worker-mlx"
+          plan=$("$worker" plan --version "$VERSION" --untested \
+            | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
+          "$worker" install --into "$RUNNER_TEMP/mlx" --plan "$plan"
+          site=$(find "$RUNNER_TEMP/mlx" -type d -name site-packages | head -1)
+          [ -n "$site" ] || { echo "::error::the install holds no site-packages"; exit 1; }
+          echo "SUPERFLUID_MLX_VENV=$(dirname "$(dirname "$(dirname "$site")")")" >> "$GITHUB_ENV"
+
+      - name: The adapter's tests on it
+        run: |
+          set -o pipefail
+          cargo test -p superfluid-adapter-mlx -- --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/mlx-tests.log" \
+            | python3 scripts/skip_report.py "MLX adapter"
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlx-${{ needs.pick.outputs.mlx }}
+          path: ${{ runner.temp }}/mlx-tests.log
+          if-no-files-found: ignore
+
+  record-mlx:
+    name: Record MLX ${{ needs.pick.outputs.mlx }}
+    needs: [pick, mlx]
+    if: always() && needs.pick.outputs.mlx != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.pick.outputs.mlx }}
+      RESULT: ${{ needs.mlx.result }}
+      GH_TOKEN: ${{ github.token }}
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open an issue with the result
+        # An MLX version is pinned by hand (every wheel with its SHA-256, see
+        # the recipe's `about`), so a pass asks for that PR rather than making it.
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" = success ]; then
+            title="MLX $VERSION passes the adapter's tests: pin it"
+            p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests passed on it: $RUN"
+            p2="To install it on its own, the next release needs the version pinned in the MLX adapter's recipe, wheel by wheel with the SHA-256 PyPI lists for each (see the recipe's about)."
+          else
+            title="MLX $VERSION breaks the adapter"
+            p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests did not pass on it: $RUN"
+            p2="The test log is the run's artifact. Until the adapter is fixed, or the version is found to be at fault, the recipe keeps its last tested version."
+          fi
+          body="$p1"$'\n\n'"$p2"
+          if [ "$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length')" != 0 ]; then
+            echo "an issue for MLX $VERSION is already open"
+            exit 0
+          fi
+          gh issue create --title "$title" --body "$body"

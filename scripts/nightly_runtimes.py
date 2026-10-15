@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""The nightly runtimes job's two decisions: which upstream release to test,
+and how to record one that passed.
+
+    nightly_runtimes.py llamacpp pick [--requested bNNNN]
+    nightly_runtimes.py llamacpp append bNNNN
+    nightly_runtimes.py mlx pick [--requested X.Y.Z]
+
+`pick` prints `version=<v>` for the newest upstream release the adapter's
+recipe does not list yet, or `version=` when there is nothing new (or when
+`--requested` names a release already listed); the workflow reads it from
+$GITHUB_OUTPUT. `append` adds a llama.cpp build to the adapter's recipe as a
+tested build, newest first: the same asset names the previous tested build
+carries, with the size and SHA-256 GitHub lists for each, so a human reviews
+a PR rather than typing digests. An MLX version is pinned by hand, wheel by
+wheel, so `mlx` has no `append`; the job opens an issue with the result.
+
+Only the standard library; GITHUB_TOKEN is used when set, for the API rate
+limit.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+RECIPES = {
+    "llamacpp": ROOT / "crates/superfluid-adapters/superfluid-adapter-llamacpp/recipe.json",
+    "mlx": ROOT / "crates/superfluid-adapters/superfluid-adapter-mlx/recipe.json",
+}
+LLAMACPP_RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30"
+LLAMACPP_RELEASE = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}"
+MLX_PYPI = "https://pypi.org/pypi/mlx/json"
+BUILD = re.compile(r"^b(\d+)$")
+
+
+def fetch_json(url: str) -> object:
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "superfluid-nightly"})
+    token = os.environ.get("GITHUB_TOKEN")
+    if token and "api.github.com" in url:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.load(resp)
+
+
+def recipe(runtime: str) -> dict:
+    return json.loads(RECIPES[runtime].read_text(encoding="utf-8"))
+
+
+def tested_versions(runtime: str) -> list[str]:
+    return [t["version"] for t in recipe(runtime).get("tested", [])]
+
+
+def build_number(tag: str) -> int:
+    m = BUILD.match(tag)
+    return int(m.group(1)) if m else -1
+
+
+def newest_llamacpp_build() -> dict:
+    """The newest `b<N>` release that carries the macOS arm64 archive, which
+    every tested build has; llama.cpp also tags semver releases, which are
+    not builds of the library."""
+    releases = fetch_json(LLAMACPP_RELEASES)
+    builds = [
+        r
+        for r in releases
+        if build_number(r["tag_name"]) >= 0
+        and not r.get("draft")
+        and any(a["name"] == f"llama-{r['tag_name']}-bin-macos-arm64.tar.gz" for a in r.get("assets", []))
+    ]
+    if not builds:
+        raise SystemExit("no llama.cpp build with a macOS arm64 archive in the newest 30 releases")
+    return max(builds, key=lambda r: build_number(r["tag_name"]))
+
+
+def pick(runtime: str, requested: str | None) -> str:
+    listed = tested_versions(runtime)
+    if requested:
+        return "" if requested in listed else requested
+    if runtime == "llamacpp":
+        newest = newest_llamacpp_build()["tag_name"]
+        have = max((build_number(v) for v in listed), default=-1)
+        return newest if build_number(newest) > have else ""
+    info = fetch_json(MLX_PYPI)["info"]["version"]
+    return "" if info in listed else info
+
+
+def append_llamacpp(version: str) -> None:
+    path = RECIPES["llamacpp"]
+    r = recipe("llamacpp")
+    tested = r.setdefault("tested", [])
+    if any(t["version"] == version for t in tested):
+        print(f"{version} is already a tested build", file=sys.stderr)
+        return
+    if not tested:
+        raise SystemExit("the recipe lists no tested build to take the asset names from")
+    previous = tested[0]
+    release = fetch_json(LLAMACPP_RELEASE.format(version=version))
+    by_name = {a["name"]: a for a in release.get("assets", [])}
+    assets, missing = [], []
+    for old in previous["assets"]:
+        name = old["name"].replace(previous["version"], version)
+        a = by_name.get(name)
+        digest = (a or {}).get("digest") or ""
+        if not a or not digest.startswith("sha256:"):
+            missing.append(name)
+            continue
+        assets.append({"name": name, "size": a["size"], "sha256": digest[len("sha256:") :]})
+    if missing:
+        # The archives the tests ran on must be there; a CUDA runtime archive
+        # dropped upstream is reported and left out.
+        required = [n for n in missing if n.endswith(("bin-macos-arm64.tar.gz", "bin-ubuntu-x64.tar.gz"))]
+        if required:
+            raise SystemExit(f"{version} lacks, or lists no SHA-256 for, {', '.join(required)}")
+        print(f"note: {version} lacks {', '.join(missing)}; left out", file=sys.stderr)
+    entry = {"version": version, "published": release["published_at"][:10], "assets": assets}
+    tested.insert(0, entry)
+    path.write_text(json.dumps(r, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"recorded {version} ({release['published_at'][:10]}) with {len(assets)} assets in {path.relative_to(ROOT)}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("runtime", choices=["llamacpp", "mlx"])
+    sub = ap.add_subparsers(dest="action", required=True)
+    p = sub.add_parser("pick", help="the newest upstream release the recipe does not list, as version=<v>")
+    p.add_argument("--requested", default="", help="test this release instead of the newest")
+    a = sub.add_parser("append", help="record a llama.cpp build that passed as a tested build")
+    a.add_argument("version")
+    args = ap.parse_args()
+    if args.action == "pick":
+        print(f"version={pick(args.runtime, args.requested.strip() or None)}")
+        return 0
+    if args.runtime != "llamacpp":
+        raise SystemExit("an MLX version is pinned by hand, wheel by wheel; see the recipe's `about`")
+    append_llamacpp(args.version)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
