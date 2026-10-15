@@ -737,63 +737,80 @@ impl LlamaRuntime {
             std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4)
         };
         let make_context = |cells: u32| {
-            // SAFETY: model is live; the params are plain data.
+            // The context parameters, filled for whichever layout this llama.cpp has
+            // (see `sys::ContextLayout`): the same assignments, the right struct.
+            macro_rules! fill {
+                ($cp:ident) => {{
+                    $cp.n_ctx = cells;
+                    $cp.n_batch = cfg.n_batch;
+                    $cp.n_ubatch = cfg.n_ubatch.min(cfg.n_batch);
+                    $cp.n_seq_max = n_seq_max;
+                    // Rows for every position of a draft being verified, not only
+                    // its last (`step_rows`).
+                    $cp.n_outputs_max_per_seq = superfluid_executor::primitives::VERIFY_ROWS_MAX;
+                    $cp.n_threads = threads;
+                    $cp.n_threads_batch = if cfg.n_threads_batch > 0 { cfg.n_threads_batch } else { threads };
+                    $cp.kv_unified = !streams;
+                    $cp.no_perf = true;
+                    if let Some(t) = cfg.flash_attn {
+                        $cp.flash_attn_type = t;
+                    }
+                    if let Some(t) = cfg.type_k {
+                        $cp.type_k = t;
+                    }
+                    if let Some(t) = cfg.type_v {
+                        $cp.type_v = t;
+                    }
+                    if let Some(on) = cfg.offload_kqv {
+                        $cp.offload_kqv = on;
+                    }
+                    if let Some(on) = cfg.op_offload {
+                        $cp.op_offload = on;
+                    }
+                    if let Some(on) = cfg.swa_full {
+                        $cp.swa_full = on;
+                    }
+                    if let Some(t) = cfg.rope_scaling {
+                        $cp.rope_scaling_type = t;
+                    }
+                    if let Some(f) = cfg.rope_freq_base {
+                        $cp.rope_freq_base = f;
+                    }
+                    if let Some(f) = cfg.rope_freq_scale {
+                        $cp.rope_freq_scale = f;
+                    }
+                    if let Some(f) = cfg.yarn_ext_factor {
+                        $cp.yarn_ext_factor = f;
+                    }
+                    if let Some(f) = cfg.yarn_attn_factor {
+                        $cp.yarn_attn_factor = f;
+                    }
+                    if let Some(f) = cfg.yarn_beta_fast {
+                        $cp.yarn_beta_fast = f;
+                    }
+                    if let Some(f) = cfg.yarn_beta_slow {
+                        $cp.yarn_beta_slow = f;
+                    }
+                    if let Some(n) = cfg.yarn_orig_ctx {
+                        $cp.yarn_orig_ctx = n;
+                    }
+                }};
+            }
+            // SAFETY: model is live; the params are plain data, read from and handed
+            // back to the library in its own layout.
             let ctx = unsafe {
-                let mut cp = sys::llama_context_default_params();
-                cp.n_ctx = cells;
-                cp.n_batch = cfg.n_batch;
-                cp.n_ubatch = cfg.n_ubatch.min(cfg.n_batch);
-                cp.n_seq_max = n_seq_max;
-                // Rows for every position of a draft being verified, not only
-                // its last (`step_rows`).
-                cp.n_outputs_max_per_seq = superfluid_executor::primitives::VERIFY_ROWS_MAX;
-                cp.n_threads = threads;
-                cp.n_threads_batch = if cfg.n_threads_batch > 0 { cfg.n_threads_batch } else { threads };
-                cp.kv_unified = !streams;
-                cp.no_perf = true;
-                if let Some(t) = cfg.flash_attn {
-                    cp.flash_attn_type = t;
+                match sys::context_layout() {
+                    sys::ContextLayout::V1 => {
+                        let mut cp = sys::llama_context_default_params();
+                        fill!(cp);
+                        sys::llama_init_from_model(model, cp)
+                    }
+                    sys::ContextLayout::V2 => {
+                        let mut cp = sys::llama_context_default_params_v2();
+                        fill!(cp);
+                        sys::llama_init_from_model_v2(model, cp)
+                    }
                 }
-                if let Some(t) = cfg.type_k {
-                    cp.type_k = t;
-                }
-                if let Some(t) = cfg.type_v {
-                    cp.type_v = t;
-                }
-                if let Some(on) = cfg.offload_kqv {
-                    cp.offload_kqv = on;
-                }
-                if let Some(on) = cfg.op_offload {
-                    cp.op_offload = on;
-                }
-                if let Some(on) = cfg.swa_full {
-                    cp.swa_full = on;
-                }
-                if let Some(t) = cfg.rope_scaling {
-                    cp.rope_scaling_type = t;
-                }
-                if let Some(f) = cfg.rope_freq_base {
-                    cp.rope_freq_base = f;
-                }
-                if let Some(f) = cfg.rope_freq_scale {
-                    cp.rope_freq_scale = f;
-                }
-                if let Some(f) = cfg.yarn_ext_factor {
-                    cp.yarn_ext_factor = f;
-                }
-                if let Some(f) = cfg.yarn_attn_factor {
-                    cp.yarn_attn_factor = f;
-                }
-                if let Some(f) = cfg.yarn_beta_fast {
-                    cp.yarn_beta_fast = f;
-                }
-                if let Some(f) = cfg.yarn_beta_slow {
-                    cp.yarn_beta_slow = f;
-                }
-                if let Some(n) = cfg.yarn_orig_ctx {
-                    cp.yarn_orig_ctx = n;
-                }
-                sys::llama_init_from_model(model, cp)
             };
             if ctx.is_null() {
                 // SAFETY: model is live and owned here.
