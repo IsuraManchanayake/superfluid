@@ -196,9 +196,15 @@ jobs:
           plan=$("$worker" plan --version "$VERSION" --untested \
             | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
           "$worker" install --into "$RUNNER_TEMP/mlx" --plan "$plan"
-          site=$(find "$RUNNER_TEMP/mlx" -type d -name site-packages | head -1)
-          [ -n "$site" ] || { echo "::error::the install holds no site-packages"; exit 1; }
-          echo "SUPERFLUID_MLX_VENV=$(dirname "$(dirname "$(dirname "$site")")")" >> "$GITHUB_ENV"
+          # The install holds the bundled interpreter under python/ and, beside it, the
+          # environment under env/ where mlx and mlx-lm went: the tests get the latter,
+          # and their test executables are built against the former, the Python 3.12 the
+          # wheels are for, whatever Python the runner has.
+          env="$RUNNER_TEMP/mlx/env"
+          "$env/bin/python" -c 'import mlx.core, mlx_lm; print("mlx", mlx.core.__version__, "in", __import__("sys").prefix)' \
+            || { echo "::error::$env is not an environment with mlx and mlx-lm"; exit 1; }
+          echo "SUPERFLUID_MLX_VENV=$env" >> "$GITHUB_ENV"
+          echo "PYO3_PYTHON=$RUNNER_TEMP/mlx/python/bin/python3" >> "$GITHUB_ENV"
 
       - name: The adapter's tests on it
         run: |
