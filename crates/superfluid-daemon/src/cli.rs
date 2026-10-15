@@ -467,8 +467,9 @@ Usage: superfluid compat [--json]
 
   basert: the baseRT header version this build carries and the engine ABI number it checks.
   A libbaseRT with the same ABI number serves, whatever its version; one that states no
-  number (0.3.0 and older) must share the major.minor. A release carries the same data
-  beside its tarball, as compat.json, so a host can choose a release before downloading it.
+  number (0.3.0 and older) serves if it is of the line that carried this ABI before it was
+  numbered, 0.3.x. A release carries the same data beside its tarball, as compat.json, so a
+  host can choose a release before downloading it.
 
 Options:
   --json    Print JSON
@@ -484,6 +485,7 @@ pub fn compat_json() -> serde_json::Value {
         serde_json::json!({
             "basert_version": superfluid_engine_ffi::libbasert::BUILT_FOR,
             "abi": superfluid_engine_ffi::libbasert::abi_built_for(),
+            "unnumbered_minor": superfluid_engine_ffi::libbasert::abi_built_for().and_then(superfluid_engine_ffi::libbasert::unnumbered_minor_for),
         }),
     );
     serde_json::json!({"superfluid": env!("CARGO_PKG_VERSION"), "runtimes": runtimes})
@@ -496,11 +498,13 @@ pub fn compat_text() -> String {
     match c["runtimes"].get("basert") {
         Some(b) => {
             let abi = b["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.3.1)".into());
+            let unnumbered = match b["unnumbered_minor"].as_str() {
+                Some(minor) => format!("one that states no number serves if it is baseRT {minor}.x"),
+                None => "one that states no number does not serve".to_string(),
+            };
             out.push_str(&format!(
-                "basert: built against baseRT {} headers, {abi}. A libbaseRT with the same ABI number serves, whatever its version; \
-                 one that states no number must be baseRT {}.x.\n",
+                "basert: built against baseRT {} headers, {abi}. A libbaseRT with the same ABI number serves, whatever its version; {unnumbered}.\n",
                 b["basert_version"].as_str().unwrap_or("?"),
-                b["basert_version"].as_str().and_then(|v| v.rsplit_once('.').map(|(mm, _)| mm.to_string())).unwrap_or_default()
             ));
         }
         None => out.push_str("basert: not in this build (no `basert` feature)\n"),
