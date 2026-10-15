@@ -1,17 +1,10 @@
 name: Nightly runtimes
 
-# Each night, the newest upstream release of each runtime this superfluid
-# drives is installed untested and the adapter's tests run on it. A llama.cpp
-# build that passes is added to the adapter's recipe by a PR, with the size
-# and SHA-256 GitHub lists for each of its assets, so the next release
-# installs it on its own; a build that fails opens an issue with the run
-# attached. An MLX version that passes arrives the same way, its entry built
-# from pip's report of the environment it resolved on the runner, every
-# wheel with the size and SHA-256 PyPI lists for it. `workflow_dispatch`
-# tests a named release instead of the newest.
-#
-# A schedule fires only from the default branch. The job is a no-op for a
-# runtime whose newest release the recipe already lists.
+# Each night the newest upstream release of each runtime is installed untested
+# and the adapter's tests run on it; one that passes is added to the recipe by
+# a PR, with the digests its project lists, and one that fails opens an issue.
+# `workflow_dispatch` tests a named release. A schedule fires only from the
+# default branch, and a release the recipe already lists is a no-op.
 
 on:
   schedule:
@@ -197,10 +190,8 @@ jobs:
           plan=$("$worker" plan --version "$VERSION" --untested \
             | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
           "$worker" install --into "$RUNNER_TEMP/mlx" --plan "$plan"
-          # The install holds the bundled interpreter under python/ and, beside it, the
-          # environment under env/ where mlx and mlx-lm went: the tests get the latter,
-          # and their test executables are built against the former, the Python 3.12 the
-          # wheels are for, whatever Python the runner has.
+          # The tests run in env/, where mlx went, and are built against the bundled
+          # python/, the 3.12 the wheels are for, whatever Python the runner has.
           env="$RUNNER_TEMP/mlx/env"
           "$env/bin/python" -c 'import mlx.core, mlx_lm; print("mlx", mlx.core.__version__, "in", __import__("sys").prefix)' \
             || { echo "::error::$env is not an environment with mlx and mlx-lm"; exit 1; }
@@ -208,10 +199,8 @@ jobs:
           echo "PYO3_PYTHON=$RUNNER_TEMP/mlx/python/bin/python3" >> "$GITHUB_ENV"
 
       - name: Install it again with a report, so the recipe records what the tests run on
-        # Not a dry run: pip installs the environment the tests then use and
-        # reports exactly that, wheel by wheel. A resolution made separately
-        # could differ from the install if a package were released or yanked
-        # in between, and the recipe would then pin something untested.
+        # A real install, not a dry run, so the report is the environment the
+        # tests then run on and not a resolution that could differ from it.
         run: |
           set -euo pipefail
           py="$SUPERFLUID_MLX_VENV/bin/python"
