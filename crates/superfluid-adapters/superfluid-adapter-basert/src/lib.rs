@@ -127,8 +127,7 @@ impl Runtime for Basert {
     }
 
     fn versions(&self, host: &Host) -> Vec<Candidate> {
-        // The pins alone: `plan` consults the release listing when a pin
-        // fails, and a listing is answered offline.
+        // The pins alone, offline: `plan` would consult the release listing when a pin fails.
         recipe::versions(host)
     }
 }

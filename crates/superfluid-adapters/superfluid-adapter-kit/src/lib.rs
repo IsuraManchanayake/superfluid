@@ -237,11 +237,8 @@ pub trait Runtime: Send + Sync {
         None
     }
 
-    /// The versions this adapter installs on its own, newest first, each
-    /// planned for `host` as `plan` plans it: `superfluid runtime versions`
-    /// and the INSTALLABLE column of `superfluid runtimes`, so it is answered
-    /// from the recipe alone, never the network. By default every `tested`
-    /// version `compat` names, planned one by one.
+    /// The versions this adapter installs on its own, newest first, each planned for `host` as `plan` would (`superfluid runtime
+    /// versions`). Answered from the recipe alone, never the network: by default every `tested` version `compat` names.
     fn versions(&self, host: &Host) -> Vec<Candidate> {
         let tested: Vec<String> =
             self.compat()["tested"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
@@ -381,8 +378,6 @@ pub fn worker_main(rt: &dyn Runtime) -> ! {
         std::process::exit(0);
     }
     if argv.first().map(String::as_str) == Some("versions") {
-        // `<worker> versions [--json]`: always JSON, for `superfluid runtime
-        // versions` and the INSTALLABLE column of `superfluid runtimes`.
         rt.prepare(&WorkerArgs::default());
         let host = Host::detect();
         let v = serde_json::json!({
@@ -602,7 +597,6 @@ mod tests {
         assert_eq!(listed[0].size(), 10, "the assets and the wheels");
         assert_eq!(listed[1].here, Err("inst 1.0 publishes no build for linux-x64".to_string()));
         assert_eq!(listed[1].size(), 0);
-        // The JSON a worker prints round-trips into what the daemon lists.
         for c in &listed {
             assert_eq!(&Candidate::from_json(&c.to_json()).unwrap(), c);
         }

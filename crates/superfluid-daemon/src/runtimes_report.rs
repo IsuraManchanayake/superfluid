@@ -72,8 +72,6 @@ pub fn table_of(found: &[Found], packages: &Path, catalog: Option<&Catalog>) -> 
     let mut rows = vec![["RUNTIME", "STATE", "INSTALL", "VERSION", "INSTALLABLE", "READS", "DEVICE", "WORKER"].map(String::from).to_vec()];
     let mut problems = Vec::new();
     for f in found {
-        // The newest version the adapter installs on its own here, asked of
-        // the adapter once per runtime, not per install.
         let installable = match (catalog, f.id.install()) {
             (Some(c), None) => crate::versions::cell(&crate::versions::of(c, f.id)),
             _ => "-".to_string(),
@@ -110,8 +108,7 @@ pub fn table_json(found: &[Found]) -> Value {
     table_json_of(found, None)
 }
 
-/// With a catalog, a runtime's row carries `installable`: the versions its
-/// adapter installs on its own here, newest first.
+/// With a catalog, a runtime's row carries `installable`, the versions its adapter installs here.
 pub fn table_json_of(found: &[Found], catalog: Option<&Catalog>) -> Value {
     Value::Array(
         found
@@ -385,13 +382,11 @@ mod tests {
         }
         use crate::versions::tests::{fake_worker_listing, manifest, LISTING};
         let home = scratch("installable");
-        // llamacpp: installed as v1-metal, its worker lists t2 (not for here) and t1 (installed).
         let dir = manifest(&home, "llamacpp", "v1-metal", "t1", "metal", true);
         fake_worker_listing(&dir.join("bin"), "superfluid-worker-llamacpp", &report("llamacpp", V, "true"), LISTING);
         std::fs::create_dir_all(dir.join("lib")).unwrap();
         std::fs::write(dir.join("lib").join(crate::dylib_tokenizer::library_file("superfluid_tokenizer_llamacpp")), b"").unwrap();
         std::os::unix::fs::symlink("v1-metal", home.join("runtimes").join("llamacpp").join("current")).unwrap();
-        // mlx: installed, its worker is from before the listing existed.
         install(&home, "mlx", &report("mlx", V, "true"), 0);
         let cat = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         let found = with_installs(&cat);

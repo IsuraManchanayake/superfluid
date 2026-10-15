@@ -75,8 +75,7 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
     })
 }
 
-/// The pinned engines, newest first, each planned for `host` from the pins
-/// alone: the ones this build drives install, the others say why not.
+/// The pinned engines, newest first, each planned from the pins alone: the driven ones install, the others say why not.
 pub fn versions(host: &Host) -> Vec<Candidate> {
     versions_with(host, &pinned())
 }
@@ -85,8 +84,6 @@ pub fn versions_with(host: &Host, pins: &[Pin]) -> Vec<Candidate> {
     use superfluid_engine_ffi::libbasert::{abi_built_for, compatible, unnumbered_minor_for, BUILT_FOR};
     let mut pins: Vec<&Pin> = pins.iter().collect();
     pins.sort_by_key(|p| std::cmp::Reverse(version_key(&p.version)));
-    // A pin this build does not drive is listed with the short reason; the
-    // loader's full sentence is for the install that was asked for anyway.
     let not_driven = |abi: Option<u32>| -> String {
         let why = match (abi, abi_built_for()) {
             (Some(n), Some(w)) => format!("states engine ABI {n}; this build drives ABI {w}"),
@@ -302,7 +299,6 @@ mod tests {
         assert_eq!(listed[1].here.as_ref().unwrap().assets[0].url, "https://pinned/basert-engine-macos-arm64-0.4.5.tar.gz", "no release listing was needed");
         assert_eq!(listed[2].here.as_ref().map(|p| p.install.as_str()), Ok("0.3.9-metal"), "the unnumbered line");
         let linux = Host { os: "linux".into(), arch: "x64".into(), ..Host::default() };
-        // Elsewhere, the engines this build drives have no bundle for the machine; the others keep their ABI verdict.
         let elsewhere = versions_with(&linux, &pins);
         for (i, driven) in [(0, false), (1, true), (2, true), (3, false)] {
             let e = elsewhere[i].here.as_ref().unwrap_err();

@@ -1,6 +1,4 @@
-//! `superfluid runtime versions <id> [--json]`, and the INSTALLABLE column of
-//! `superfluid runtimes`: the versions an adapter installs on its own, which
-//! of them install on this machine, and which are installed.
+//! `superfluid runtime versions <id> [--json]`, and the INSTALLABLE column of `superfluid runtimes`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,11 +20,8 @@ pub struct Listing {
     pub pinned: Option<String>,
 }
 
-/// What the adapter lists for this machine: from the worker named by
-/// `SUPERFLUID_WORKER_<ID>` when one is, as every other use of the runtime
-/// honours it; else in process when this build links the adapter; else from
-/// the worker `superfluid runtime install` would use. A worker answers
-/// `versions` from its recipe alone.
+/// What the adapter lists for this machine: the worker named by `SUPERFLUID_WORKER_<ID>` when one is, else the
+/// linked adapter in process, else the worker `runtime install` would use; a worker answers from its recipe alone.
 pub fn of(catalog: &Catalog, id: RuntimeId) -> Result<Listing, String> {
     let named = std::env::var_os(crate::runtimes::worker_env(id.base())).map(PathBuf::from);
     of_with(catalog, id, named.as_deref())
@@ -70,8 +65,7 @@ pub fn here(listing: &Listing) -> Vec<&str> {
     listing.candidates.iter().filter(|c| c.here.is_ok()).map(|c| c.version.as_str()).collect()
 }
 
-/// The INSTALLABLE cell of `superfluid runtimes`: the newest listed version
-/// that installs here, marked when an install of it exists.
+/// The INSTALLABLE cell: the newest listed version that installs here, marked when an install of it exists.
 pub fn cell(listing: &Result<Listing, String>) -> String {
     let Ok(l) = listing else { return "-".into() };
     match l.candidates.iter().find(|c| c.here.is_ok()) {
@@ -81,8 +75,7 @@ pub fn cell(listing: &Result<Listing, String>) -> String {
     }
 }
 
-/// One line of the listing: a version the adapter lists, or one that is
-/// installed without being listed (`--untested`, or an archive of your own).
+/// A line of the listing: a listed version, or an installed one the adapter does not list.
 struct Row<'a> {
     version: &'a str,
     listed: Option<&'a Candidate>,
@@ -183,8 +176,7 @@ pub(crate) mod tests {
         d
     }
 
-    /// A worker that answers `versions` with `listing` and anything else
-    /// with `report`, both exit 0.
+    /// A worker that answers `versions` with `listing` and anything else with `report`.
     pub(crate) fn fake_worker_listing(dir: &Path, name: &str, report: &str, listing: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let p = dir.join(name);
@@ -244,7 +236,6 @@ pub(crate) mod tests {
         assert_eq!(here(&l), ["t1"]);
         assert_eq!(cell(&Ok(l)), "t1 (installed)");
 
-        // Pinned, the pin is marked and the ranking's default is not.
         std::fs::write(home.join("runtimes").join("toyrt").join("pinned"), "t9-cpu\n").unwrap();
         let l = of(&cat, id).unwrap();
         let text = l.text();
@@ -253,17 +244,13 @@ pub(crate) mod tests {
         assert_eq!(squeezed[4], "t9 (not a version this adapter lists) t9-cpu (pinned)", "{text}");
         assert_eq!(l.json()["pinned"], "t9-cpu");
 
-        // Nothing installed, nothing installs here: the column says so.
         let bare = Listing { installs: vec![], default: None, pinned: None, candidates: vec![Candidate { version: "t2".into(), here: Err("no".into()) }], ..l };
         assert_eq!(cell(&Ok(bare)), "none here");
 
-        // A worker from before the listing existed answers nothing: the column shows a dash.
         crate::runtimes::tests::fake_worker(&libexec, "superfluid-worker-oldrt", "{}", 2);
         let Err(e) = of(&cat, RuntimeId::new("oldrt")) else { panic!("an old worker listed versions") };
         assert!(e.contains("lists no versions"), "{e}");
         assert_eq!(cell(&Err(e)), "-");
-        // A worker named explicitly (SUPERFLUID_WORKER_<ID>) is the one asked, before any
-        // linked adapter or shipped worker: the one `runtime install` would use.
         let named = fake_worker_listing(&root.join("elsewhere"), "superfluid-worker-named", "{}", r#"{"describe":"here","versions":[{"version":"n1","error":"not here"}]}"#);
         for id in crate::linked::ids().into_iter().chain([RuntimeId::new("toyrt")]) {
             let l = of_with(&cat, id, Some(&named)).unwrap();

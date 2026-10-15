@@ -221,9 +221,7 @@ impl Plan {
     }
 }
 
-/// One version an adapter installs on its own, as `superfluid runtime
-/// versions` lists it: planned for a host as `plan` plans it, the first plan
-/// when it installs there, else why it does not.
+/// A version an adapter installs on its own, planned for a host: the first plan, or why it does not install there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub version: String,
