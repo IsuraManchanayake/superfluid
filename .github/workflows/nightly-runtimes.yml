@@ -75,6 +75,8 @@ jobs:
 
       - name: Build the worker and plan the untested install
         id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
           plan=$(target/debug/superfluid-worker-llamacpp plan --version "$BUILD" --untested \
@@ -135,7 +137,8 @@ jobs:
         run: |
           set -euo pipefail
           branch="nightly/llamacpp-$BUILD"
-          if [ "$(gh pr list --head "$branch" --state open --json number --jq 'length')" != 0 ]; then
+          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          if [ "$open" != 0 ]; then
             echo "a PR from $branch is already open"
             exit 0
           fi
@@ -154,8 +157,14 @@ jobs:
         run: |
           set -euo pipefail
           title="llama.cpp $BUILD breaks the adapter"
-          if [ "$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length')" != 0 ]; then
-            echo "an issue for $BUILD is already open"
+          # One open issue per runtime: a later build that fails too is a comment on it, since
+          # the newest build is tested every night and the adapter may take days to catch up.
+          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          if [ -n "$existing" ]; then
+            number=${existing%% *}
+            case "$existing" in *"$title"*) echo "an issue for $BUILD is already open: #$number"; exit 0;; esac
+            gh issue comment "$number" --body "$BUILD fails too: $RUN"
+            echo "noted $BUILD on the open issue #$number"
             exit 0
           fi
           p1="The nightly job installed llama.cpp $BUILD untested and the adapter's tests did not pass on it: $RUN"
@@ -212,6 +221,11 @@ jobs:
           python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["install"]), "distributions installed and reported")' "$RUNNER_TEMP/mlx-report.json"
 
       - name: The adapter's tests on it
+        # The test executable links @rpath/libpython3.12.dylib like the worker, but has no
+        # rpath into the install, so the install's lib directory is named for dyld.
+        env:
+          DYLD_LIBRARY_PATH: ${{ runner.temp }}/mlx/python/lib
+          DYLD_FALLBACK_LIBRARY_PATH: ${{ runner.temp }}/mlx/python/lib
         run: |
           set -o pipefail
           cargo test -p superfluid-adapter-mlx -- --nocapture 2>&1 \
@@ -253,7 +267,8 @@ jobs:
         run: |
           set -euo pipefail
           branch="nightly/mlx-$VERSION"
-          if [ "$(gh pr list --head "$branch" --state open --json number --jq 'length')" != 0 ]; then
+          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          if [ "$open" != 0 ]; then
             echo "a PR from $branch is already open"
             exit 0
           fi
@@ -274,8 +289,13 @@ jobs:
         run: |
           set -euo pipefail
           title="MLX $VERSION breaks the adapter"
-          if [ "$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length')" != 0 ]; then
-            echo "an issue for MLX $VERSION is already open"
+          # One open issue per runtime: a later version that fails too is a comment on it.
+          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          if [ -n "$existing" ]; then
+            number=${existing%% *}
+            case "$existing" in *"$title"*) echo "an issue for MLX $VERSION is already open: #$number"; exit 0;; esac
+            gh issue comment "$number" --body "MLX $VERSION fails too: $RUN"
+            echo "noted MLX $VERSION on the open issue #$number"
             exit 0
           fi
           p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests did not pass on it: $RUN"
