@@ -5,9 +5,10 @@ name: Nightly runtimes
 # build that passes is added to the adapter's recipe by a PR, with the size
 # and SHA-256 GitHub lists for each of its assets, so the next release
 # installs it on its own; a build that fails opens an issue with the run
-# attached. An MLX version is pinned by hand, wheel by wheel, so its result
-# is an issue either way. `workflow_dispatch` tests a named release instead
-# of the newest.
+# attached. An MLX version that passes arrives the same way, its entry built
+# from pip's report of the environment it resolved on the runner, every
+# wheel with the size and SHA-256 PyPI lists for it. `workflow_dispatch`
+# tests a named release instead of the newest.
 #
 # A schedule fires only from the default branch. The job is a no-op for a
 # runtime whose newest release the recipe already lists.
@@ -200,6 +201,18 @@ jobs:
           [ -n "$site" ] || { echo "::error::the install holds no site-packages"; exit 1; }
           echo "SUPERFLUID_MLX_VENV=$(dirname "$(dirname "$(dirname "$site")")")" >> "$GITHUB_ENV"
 
+      - name: What pip resolved for it, for the recipe
+        # The same interpreter the install used, so the report names the
+        # wheels for Python 3.12 on macOS arm64, which the recipe pins.
+        run: |
+          set -euo pipefail
+          py="$SUPERFLUID_MLX_VENV/bin/python"
+          [ -x "$py" ] || py="$SUPERFLUID_MLX_VENV/bin/python3"
+          "$py" -m pip --version >/dev/null 2>&1 || "$py" -m ensurepip --upgrade >/dev/null
+          "$py" -m pip install --dry-run --ignore-installed --only-binary=:all: \
+            --report "$RUNNER_TEMP/mlx-report.json" "mlx==$VERSION" mlx-lm >/dev/null
+          python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["install"]), "distributions resolved")' "$RUNNER_TEMP/mlx-report.json"
+
       - name: The adapter's tests on it
         run: |
           set -o pipefail
@@ -211,7 +224,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mlx-${{ needs.pick.outputs.mlx }}
-          path: ${{ runner.temp }}/mlx-tests.log
+          path: |
+            ${{ runner.temp }}/mlx-tests.log
+            ${{ runner.temp }}/mlx-report.json
           if-no-files-found: ignore
 
   record-mlx:
@@ -227,23 +242,45 @@ jobs:
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
-      - name: Open an issue with the result
-        # An MLX version is pinned by hand (every wheel with its SHA-256, see
-        # the recipe's `about`), so a pass asks for that PR rather than making it.
+      - if: needs.mlx.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: mlx-${{ needs.pick.outputs.mlx }}
+          path: ${{ runner.temp }}/mlx
+
+      - name: Passed, so add it to the recipe in a PR
+        if: needs.mlx.result == 'success'
+        env:
+          BASE: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "$RESULT" = success ]; then
-            title="MLX $VERSION passes the adapter's tests: pin it"
-            p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests passed on it: $RUN"
-            p2="To install it on its own, the next release needs the version pinned in the MLX adapter's recipe, wheel by wheel with the SHA-256 PyPI lists for each (see the recipe's about)."
-          else
-            title="MLX $VERSION breaks the adapter"
-            p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests did not pass on it: $RUN"
-            p2="The test log is the run's artifact. Until the adapter is fixed, or the version is found to be at fault, the recipe keeps its last tested version."
+          branch="nightly/mlx-$VERSION"
+          if [ "$(gh pr list --head "$branch" --state open --json number --jq 'length')" != 0 ]; then
+            echo "a PR from $branch is already open"
+            exit 0
           fi
+          git switch -c "$branch"
+          python3 scripts/nightly_runtimes.py mlx append "$VERSION" --report "$RUNNER_TEMP/mlx/mlx-report.json"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -am "mlx: tested with $VERSION"
+          git push -f origin "$branch"
+          p1="The nightly job installed MLX $VERSION untested on macos-14 and ran the adapter's tests on it: $RUN"
+          p2="This adds the version to the adapter's recipe as a tested one: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
           body="$p1"$'\n\n'"$p2"
+          gh pr create --base "$BASE" --head "$branch" --title "mlx: tested with $VERSION" --body "$body"
+
+      - name: Failed, so open an issue
+        if: needs.mlx.result != 'success'
+        # Among the failures: an MLX that needs a newer Python than the
+        # adapter ships, which is a change to the worker's build, not a pin.
+        run: |
+          set -euo pipefail
+          title="MLX $VERSION breaks the adapter"
           if [ "$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length')" != 0 ]; then
             echo "an issue for MLX $VERSION is already open"
             exit 0
           fi
+          p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests did not pass on it: $RUN"
+          p2="The test log is the run's artifact. Until the adapter is fixed, or the version is found to be at fault, the recipe keeps its last tested version. A version that needs a newer Python than the adapter ships fails here too: that is a change to the worker's build, not a pin."
+          body="$p1"$'\n\n'"$p2"
           gh issue create --title "$title" --body "$body"
