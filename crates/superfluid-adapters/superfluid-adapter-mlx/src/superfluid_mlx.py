@@ -342,19 +342,13 @@ class Runtime:
 
     def _measure_kv_bytes(self, kv_only=False):
         """Bytes of cache state one token leaves behind, over every layer, or
-        over the layers whose cache holds keys and values (`kv_only`)."""
+        over the layers whose cache holds keys and values (`kv_only`). Read
+        from the live state: from mlx-lm 0.32 a grown cache's `state` holds
+        the growth step its buffer was made with (256 tokens), not the one
+        token fed."""
         caches = _cache.make_prompt_cache(self.model)
         mx.eval(self.model(mx.array([[0]], dtype=mx.int32), cache=caches))
-        total = 0
-        for c in caches:
-            if kv_only and not _holds_kv(c):
-                continue
-            state = c.state
-            arrays = state if isinstance(state, (list, tuple)) else [state]
-            for a in arrays:
-                if a is not None and hasattr(a, "nbytes"):
-                    total += int(a.nbytes)
-        return total
+        return sum(_live_bytes(c) for c in caches if not kv_only or _holds_kv(c))
 
     def describe(self):
         return {
