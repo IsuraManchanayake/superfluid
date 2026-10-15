@@ -142,7 +142,8 @@ jobs:
         run: |
           set -euo pipefail
           branch="nightly/llamacpp-$BUILD"
-          if [ "$(gh pr list --head "$branch" --state open --json number --jq 'length')" != 0 ]; then
+          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          if [ "$open" != 0 ]; then
             echo "a PR from $branch is already open"
             exit 0
           fi
@@ -161,7 +162,8 @@ jobs:
         run: |
           set -euo pipefail
           title="llama.cpp $BUILD breaks the adapter"
-          if [ "$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length')" != 0 ]; then
+          open=$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          if [ "$open" != 0 ]; then
             echo "an issue for $BUILD is already open"
             exit 0
           fi
@@ -223,6 +225,11 @@ jobs:
           python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["install"]), "distributions installed and reported")' "$RUNNER_TEMP/mlx-report.json"
 
       - name: The adapter's tests on it
+        # The test executable links @rpath/libpython3.12.dylib like the worker, but has no
+        # rpath into the install, so the install's lib directory is named for dyld.
+        env:
+          DYLD_LIBRARY_PATH: ${{ runner.temp }}/mlx/python/lib
+          DYLD_FALLBACK_LIBRARY_PATH: ${{ runner.temp }}/mlx/python/lib
         run: |
           set -o pipefail
           cargo test -p superfluid-adapter-mlx -- --nocapture 2>&1 \
@@ -264,7 +271,8 @@ jobs:
         run: |
           set -euo pipefail
           branch="nightly/mlx-$VERSION"
-          if [ "$(gh pr list --head "$branch" --state open --json number --jq 'length')" != 0 ]; then
+          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          if [ "$open" != 0 ]; then
             echo "a PR from $branch is already open"
             exit 0
           fi
@@ -285,7 +293,8 @@ jobs:
         run: |
           set -euo pipefail
           title="MLX $VERSION breaks the adapter"
-          if [ "$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length')" != 0 ]; then
+          open=$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          if [ "$open" != 0 ]; then
             echo "an issue for MLX $VERSION is already open"
             exit 0
           fi
