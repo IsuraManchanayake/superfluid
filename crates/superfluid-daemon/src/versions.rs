@@ -2,7 +2,7 @@
 //! `superfluid runtimes`: the versions an adapter installs on its own, which
 //! of them install on this machine, and which are installed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
@@ -22,17 +22,25 @@ pub struct Listing {
     pub pinned: Option<String>,
 }
 
-/// What the adapter lists for this machine: in process when this build links
-/// the adapter, else from the worker `superfluid runtime install` would use,
-/// which answers `versions` from its recipe alone.
+/// What the adapter lists for this machine: from the worker named by
+/// `SUPERFLUID_WORKER_<ID>` when one is, as every other use of the runtime
+/// honours it; else in process when this build links the adapter; else from
+/// the worker `superfluid runtime install` would use. A worker answers
+/// `versions` from its recipe alone.
 pub fn of(catalog: &Catalog, id: RuntimeId) -> Result<Listing, String> {
+    let named = std::env::var_os(crate::runtimes::worker_env(id.base())).map(PathBuf::from);
+    of_with(catalog, id, named.as_deref())
+}
+
+pub fn of_with(catalog: &Catalog, id: RuntimeId, named: Option<&Path>) -> Result<Listing, String> {
     let id = id.base();
-    let (host, candidates) = match crate::linked::get(id) {
-        Some(rt) => {
+    let (host, candidates) = match (named, crate::linked::get(id)) {
+        (Some(worker), _) => asked(worker)?,
+        (None, Some(rt)) => {
             let host = Host::detect();
             (host.describe(), rt.versions(&host))
         }
-        None => asked(&installs::installer(catalog, id)?)?,
+        (None, None) => asked(&installs::installer(catalog, id)?)?,
     };
     Ok(Listing {
         id,
@@ -178,6 +186,7 @@ pub(crate) mod tests {
     /// A worker that answers `versions` with `listing` and anything else
     /// with `report`, both exit 0.
     pub(crate) fn fake_worker_listing(dir: &Path, name: &str, report: &str, listing: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
         let p = dir.join(name);
         std::fs::write(&p, format!("#!/bin/sh\nif [ \"$1\" = versions ]; then cat <<'EOF'\n{listing}\nEOF\nexit 0; fi\ncat <<'EOF'\n{report}\nEOF\nexit 0\n"))
             .unwrap();
@@ -253,6 +262,13 @@ pub(crate) mod tests {
         let Err(e) = of(&cat, RuntimeId::new("oldrt")) else { panic!("an old worker listed versions") };
         assert!(e.contains("lists no versions"), "{e}");
         assert_eq!(cell(&Err(e)), "-");
+        // A worker named explicitly (SUPERFLUID_WORKER_<ID>) is the one asked, before any
+        // linked adapter or shipped worker: the one `runtime install` would use.
+        let named = fake_worker_listing(&root.join("elsewhere"), "superfluid-worker-named", "{}", r#"{"describe":"here","versions":[{"version":"n1","error":"not here"}]}"#);
+        for id in crate::linked::ids().into_iter().chain([RuntimeId::new("toyrt")]) {
+            let l = of_with(&cat, id, Some(&named)).unwrap();
+            assert_eq!((l.host.as_str(), l.candidates.len(), l.candidates[0].version.as_str()), ("here", 1, "n1"), "{}", id.name());
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
