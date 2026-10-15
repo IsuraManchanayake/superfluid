@@ -63,14 +63,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+        # The macOS leg runs on a self-hosted Apple silicon runner. The hosted
+        # macos-14 runner's virtualized GPU takes llama.cpp's fallback Metal
+        # kernels, which fail the adapter's numeric tests whatever the build,
+        # and its memory leaves the pool shared where the tests expect a
+        # buffer per lane.
+        include:
+          - os: macos
+            runner: [self-hosted, macOS, ARM64]
+          - os: ubuntu-24.04
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
     steps:
       - uses: actions/checkout@v4
+      # A self-hosted runner keeps the toolchain it has.
       - uses: dtolnay/rust-toolchain@stable
+        if: runner.environment == 'github-hosted'
       - uses: Swatinem/rust-cache@v2
 
       - name: Build the worker and plan the untested install
