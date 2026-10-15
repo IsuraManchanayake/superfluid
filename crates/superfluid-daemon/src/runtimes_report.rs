@@ -112,6 +112,7 @@ fn runtime_json(f: &Found) -> Value {
         v["requires"] = json!({
             "basert_version": superfluid_engine_ffi::libbasert::BUILT_FOR,
             "basert_abi": superfluid_engine_ffi::libbasert::abi_built_for(),
+            "basert_unnumbered_minor": superfluid_engine_ffi::libbasert::abi_built_for().and_then(superfluid_engine_ffi::libbasert::unnumbered_minor_for),
         });
     }
     if let Some(info) = &f.info {
