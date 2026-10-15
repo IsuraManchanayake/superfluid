@@ -7,9 +7,7 @@ fn recipe() -> Value {
     serde_json::from_str(include_str!("../recipe.json")).expect("recipe.json is JSON")
 }
 
-/// A release this adapter installs on its own: its engine bundles with the
-/// digests baseRT published, and the ABI number its engine states (none for
-/// 0.3.x, which carried ABI 1 before the number existed).
+/// A release this adapter installs on its own: its bundles with their digests, and the ABI number its engine states (none for 0.3.x).
 #[derive(Debug, Clone)]
 pub struct Pin {
     pub version: String,
@@ -85,8 +83,6 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             return Err(format!("baseRT's engine runs on {backend} here, not {backend_asked}"));
         }
     }
-    // What this superfluid drives, as the loader judges it: the engine's ABI
-    // number when the release states one, else the version alone.
     let drives = |v: &str, abi: Option<u32>| compatible(abi, abi_built_for(), v).is_ok();
     let refuse_untested = |v: &str, abi: Option<u32>| -> Result<(), String> {
         match compatible(abi, abi_built_for(), v) {
@@ -204,8 +200,7 @@ mod tests {
         Host { os: "macos".into(), arch: "arm64".into(), ..Host::default() }
     }
 
-    /// A release as GitHub lists it, with the engine's ABI marker beside the
-    /// bundle when it states one.
+    /// A release as GitHub lists it.
     fn release(v: &str, abi: Option<u32>) -> Value {
         let mut assets = vec![
             json!({"name": format!("basert-engine-macos-arm64-{v}.tar.gz"), "size": 10, "digest": "sha256:ab",
@@ -241,17 +236,14 @@ mod tests {
         assert_eq!(p.assets[0].sha256.as_deref(), Some("ef"), "the pinned digest, not the one the release page shows");
         let p = &plan_with(&Request::default(), &mac(), &pins, &Value::Null).unwrap()[0];
         assert_eq!(p.assets[0].url, "https://pinned/basert-engine-macos-arm64-0.4.5.tar.gz", "a pin needs no release listing");
-        // Without a pin of our number, the unnumbered 0.3.x line is next.
         let p = &plan_with(&Request::default(), &mac(), &pins[..2], &Value::Null).unwrap()[0];
         assert_eq!((p.version.as_str(), p.tested), ("0.3.9", true));
-        // Another number, or an unnumbered engine of another line, only with --untested.
         for v in ["0.5.0", "0.2.0"] {
             let e = plan_with(&Request { version: Some(v.into()), ..Request::default() }, &mac(), &pins, &releases).unwrap_err();
             assert!(e.contains("--untested") && e.contains("is not an engine this adapter drives"), "{e}");
             let p = &plan_with(&Request { version: Some(v.into()), untested: true, ..Request::default() }, &mac(), &pins, &releases).unwrap()[0];
             assert!(!p.tested && p.version == v, "{p:?}");
         }
-        // A listing with nothing we drive says what we drive and what there is.
         let e = plan_with(&Request::default(), &mac(), &[], &json!([release("0.5.0", Some(other))])).unwrap_err();
         assert!(e.contains(&format!("engine ABI {same}, or a 0.3.x engine that states none")) && e.contains("the newest is 0.5.0"), "{e}");
     }

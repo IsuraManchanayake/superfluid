@@ -315,7 +315,7 @@ extern "C" {
 
     pub fn baseRT_get_config(model: baseRT_model_t) -> BaseRTModelConfig;
     pub fn baseRT_model_config_sizeof() -> usize;
-    /// The library's BASERT_ABI_VERSION (since 0.3.1).
+    /// The library's BASERT_ABI_VERSION (since 0.4.0).
     pub fn baseRT_abi_version() -> std::os::raw::c_uint;
     /// The configuration copied into a caller-sized buffer, zero-filled past
     /// the library's struct; returns the library's sizeof (since 0.4.0).

@@ -106,9 +106,7 @@ fn runtime_json(f: &Found) -> Value {
     let mut v = json!({"id": f.id.name(), "state": state(f)});
     #[cfg(feature = "basert")]
     if f.id.base().name() == "basert" {
-        // What this build needs of the engine, for a host choosing a libbaseRT
-        // or a superfluid: the header it was built against and the ABI
-        // number it checks (see `superfluid compat`).
+        // What this build requires of the engine, for a host choosing a library or a release.
         v["requires"] = json!({
             "basert_version": superfluid_engine_ffi::libbasert::BUILT_FOR,
             "basert_abi": superfluid_engine_ffi::libbasert::abi_built_for(),

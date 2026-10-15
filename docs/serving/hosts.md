@@ -13,7 +13,7 @@ A product can run superfluid as its server: start `superfluid serve` with its ow
 
 ## Checking compatibility before serving
 
-The engine library and superfluid must agree on the engine's C ABI. Since baseRT 0.3.1 the library states an ABI number (`baseRT_abi_version()`, the header's `BASERT_ABI_VERSION`), and superfluid is built against a header with the same macro. The rule superfluid applies when it opens the library:
+The engine library and superfluid must agree on the engine's C ABI. Since baseRT 0.4.0 the library states an ABI number (`baseRT_abi_version()`, the header's `BASERT_ABI_VERSION`), and superfluid is built against a header with the same macro. The rule superfluid applies when it opens the library:
 
 - Both sides state a number: they must be equal. The version numbers do not matter.
 - The library states none, which only 0.3.0 and older do: it serves if it is 0.3.x, the line that carried ABI 1 before the number existed. (A superfluid built against a header without the macro judges by major.minor, as before.)

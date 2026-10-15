@@ -178,8 +178,7 @@ fn refused_for_access(said: &str) -> bool {
 pub struct Probe {
     pub version: String,
     pub devices: Vec<Device>,
-    /// The contract number the adapter checked the runtime against, when
-    /// the runtime states one: baseRT's engine ABI number.
+    /// The contract number the runtime states, when it states one (baseRT's engine ABI).
     pub abi: Option<u64>,
 }
 

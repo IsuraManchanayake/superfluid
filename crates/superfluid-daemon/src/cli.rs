@@ -497,7 +497,7 @@ pub fn compat_text() -> String {
     let c = compat_json();
     match c["runtimes"].get("basert") {
         Some(b) => {
-            let abi = b["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.3.1)".into());
+            let abi = b["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.4.0)".into());
             let unnumbered = match b["unnumbered_minor"].as_str() {
                 Some(minor) => format!("one that states no number serves if it is baseRT {minor}.x"),
                 None => "one that states no number does not serve".to_string(),

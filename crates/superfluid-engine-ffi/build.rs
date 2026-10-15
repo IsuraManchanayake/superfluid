@@ -21,8 +21,7 @@ fn main() {
         field("BASERT_VERSION_PATCH")
     );
     println!("cargo:rustc-env=SUPERFLUID_BASERT_HEADER_VERSION={version}");
-    // The engine ABI number the header promises (BASERT_ABI_VERSION, since
-    // baseRT 0.3.1); empty for a header without one.
+    // BASERT_ABI_VERSION from the header; empty for a header without one.
     let abi = text
         .lines()
         .find_map(|l| l.trim().strip_prefix("#define BASERT_ABI_VERSION ").map(|v| v.trim().to_string()))

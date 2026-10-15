@@ -610,9 +610,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
         Ok(rt) => match (catalog.require(rt), not_there(&model)) {
             (Ok(rt), _) => rt,
             (Err(_), Some(why)) => refuse(2, why),
-            // The runtime is not here, or cannot run here (its engine library
-            // missing or of another contract): exit 4, so a host that starts
-            // superfluid can tell this from a flag it got wrong.
+            // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong.
             (Err(_), None) => superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline)
                 .unwrap_or_else(|e| refuse(4, e)),
         },

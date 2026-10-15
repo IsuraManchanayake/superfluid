@@ -595,9 +595,7 @@ pub fn sizing_of(rt: &Runtime, model: &Path) -> Result<superfluid_adapter_kit::S
     }
 }
 
-/// The directory of this executable with links resolved, so a `superfluid`
-/// reached through a symlink (a package manager's `bin/`, a host's shim)
-/// still finds its workerd and the adapters it ships beside the real one.
+/// This executable's directory with links resolved, so a symlinked `superfluid` still finds its workerd and adapters.
 fn beside_this_executable() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);

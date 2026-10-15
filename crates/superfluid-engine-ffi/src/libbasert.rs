@@ -6,15 +6,12 @@ use std::sync::{Mutex, OnceLock};
 
 pub const BUILT_FOR: &str = env!("SUPERFLUID_BASERT_HEADER_VERSION");
 
-/// The engine ABI number the headers superfluid was built against promise
-/// (`BASERT_ABI_VERSION`, since baseRT 0.3.1); `None` for an older header.
+/// The engine ABI number the header superfluid was built against states (`BASERT_ABI_VERSION`, since baseRT 0.4.0); `None` for an older header.
 pub fn abi_built_for() -> Option<u32> {
     env!("SUPERFLUID_BASERT_ABI").parse().ok()
 }
 
-/// The libraries that carry an ABI's functions and layouts without stating
-/// its number: 0.3.x carries ABI 1, released before the number existed. No
-/// later ABI has such libraries.
+/// The line that carries an ABI without stating its number: 0.3.x carries ABI 1, from before the number existed.
 pub fn unnumbered_minor_for(abi: u32) -> Option<&'static str> {
     (abi == 1).then_some("0.3")
 }
@@ -186,8 +183,7 @@ pub(crate) struct Loaded {
 pub struct Library {
     pub path: PathBuf,
     pub version: String,
-    /// The library's engine ABI number (`baseRT_abi_version()`), which a
-    /// library older than 0.3.1 does not state.
+    /// The library's engine ABI number (`baseRT_abi_version()`); a library before 0.4.0 states none.
     pub abi: Option<u32>,
 }
 
@@ -313,7 +309,7 @@ fn open_at(path: &Path) -> Result<Loaded, String> {
         }
     };
     // SAFETY: a query with no arguments, on a library that exports it
-    // (0.3.1 and later); an older library has no such symbol.
+    // (0.4.0 and later); an older library has no such symbol.
     let abi: Option<u32> = unsafe { lib.get::<unsafe extern "C" fn() -> std::os::raw::c_uint>(b"baseRT_abi_version\0") }
         .ok()
         .map(|f| unsafe { f() });
@@ -328,19 +324,14 @@ fn open_at(path: &Path) -> Result<Loaded, String> {
     .ok()
     .map(|f| *f);
     if get_config_into.is_none() {
-        // Read by value, so the library must lay the struct out as these
-        // bindings expect; read by size, any layout that only appends is fine.
+        // By value, the layout must match; by size, any layout that only appends does.
         // SAFETY: a query with no arguments.
         same_config_layout(unsafe { (sys.baseRT_model_config_sizeof)() }, &version, path)?;
     }
     Ok(Loaded { _lib: lib, sys, tick, get_config_into, info: Library { path: path.to_path_buf(), version, abi } })
 }
 
-/// The model's configuration, read by size when the library can (0.4.0 and
-/// later): the fields these bindings know, and zeros for any the library
-/// does not have, so the struct may grow across releases without a change
-/// of ABI number. An older library is read by value, which the load checked
-/// lays the struct out as these bindings expect.
+/// The model's configuration: by size from a library that exports `baseRT_get_config_into`, zeros past what it has; by value from an older one, whose layout the load checked.
 ///
 /// # Safety
 /// `model` is a live handle; libbaseRT is loaded (see [`load`]).
@@ -359,14 +350,9 @@ pub unsafe fn config_of(model: sys::baseRT_model_t) -> sys::BaseRTModelConfig {
     }
 }
 
-/// Whether a library can be driven through these bindings. With an ABI
-/// number on both sides (a library of baseRT 0.3.1 or later, and a
-/// superfluid built against such a header) the numbers decide, whatever the
-/// versions say: that is what the number promises. A library that states
-/// none is 0.3.0 or older, and serves if it is of the line that carried this
-/// ABI before it was numbered (see [`unnumbered_minor_for`]). A superfluid
-/// built against a header without the macro judges by major.minor, as every
-/// library before 0.3.1 was judged.
+/// Whether a library can be driven through these bindings: numbers on both sides decide, whatever the versions say; a library that
+/// states none serves if it is of the line that carried this ABI before it was numbered; a build against a header without the
+/// macro judges by major.minor, as before.
 pub fn compatible(have: Option<u32>, want: Option<u32>, version: &str) -> Result<(), String> {
     match (have, want) {
         (Some(h), Some(w)) if h == w => Ok(()),
