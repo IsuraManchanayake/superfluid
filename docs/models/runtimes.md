@@ -124,6 +124,10 @@ Requests a model cannot serve are refused with a 400:
 | `unsupported_runtime` | a load the runtime cannot serve as asked |
 | `unsupported_parameter` | a request parameter the path does not support |
 
+## How an upstream release becomes a tested one
+
+Each adapter installs on its own only the upstream versions it was built and tested against, listed in its `recipe.json`; another installs with `--untested` and is still checked at load. A nightly job (`.github/workflows/nightly-runtimes.yml`) keeps those lists current: it installs the newest upstream release untested, runs the adapter's tests on it, and records the result. A llama.cpp build that passes arrives as a PR adding it to the recipe with the size and SHA-256 GitHub lists for each of its assets (`scripts/nightly_runtimes.py llamacpp append <build>`); one that fails opens an issue with the run attached. An MLX version is pinned by hand, wheel by wheel, so its result opens an issue either way. `workflow_dispatch` tests a named release instead of the newest.
+
 ## Per-runtime limits
 
 ### llamacpp
