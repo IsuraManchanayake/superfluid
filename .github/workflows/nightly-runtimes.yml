@@ -300,9 +300,13 @@ jobs:
         run: |
           set -euo pipefail
           title="MLX $VERSION breaks the adapter"
-          open=$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
-          if [ "$open" != 0 ]; then
-            echo "an issue for MLX $VERSION is already open"
+          # One open issue per runtime: a later version that fails too is a comment on it.
+          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          if [ -n "$existing" ]; then
+            number=${existing%% *}
+            case "$existing" in *"$title"*) echo "an issue for MLX $VERSION is already open: #$number"; exit 0;; esac
+            gh issue comment "$number" --body "MLX $VERSION fails too: $RUN"
+            echo "noted MLX $VERSION on the open issue #$number"
             exit 0
           fi
           p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests did not pass on it: $RUN"
