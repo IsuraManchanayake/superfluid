@@ -566,6 +566,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
             })
             .collect()
     };
+    // Every worker this process starts gets its runtime's options, the first probe included,
+    // so an option that makes a runtime usable here counts before the runtime is required.
+    // Each is checked against what the worker declares once the runtime answers.
+    superfluid_daemon::runtime_options::set(superfluid_daemon::runtime_options::given_pairs(&runtime_options));
     let sessions = Some(sessions.unwrap_or_else(|| superfluid_daemon::cli::default_sessions(catalog.home())));
     let socket = if embedding.session_socket {
         Some(socket.unwrap_or_else(|| superfluid_daemon::cli::default_socket(catalog.home(), SUN_PATH_LEN)))
@@ -642,6 +646,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
         Err(e) => refuse(2, if picked { e } else { not_there(&model).unwrap_or(e) }),
         Ok(rt) => match (catalog.require(rt), not_there(&model)) {
             (Ok(rt), _) => rt,
+            // The runtime answers without its options and refuses one of them: say which.
+            (Err(_), _) if superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options).is_some() => {
+                refuse(2, superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options).unwrap_or_default())
+            }
             (Err(_), Some(why)) => refuse(2, why),
             // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong.
             (Err(_), None) => superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline)
@@ -651,11 +659,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
     if let Err(e) = refuse_statically(&runtime, park_lossy, kv_bits_arg, speculate.as_deref()) {
         refuse(2, e);
     }
-    // Each runtime's options are checked against what its worker declares before any model
-    // loads, and kept for every worker this process starts.
-    superfluid_daemon::runtime_options::set(
-        superfluid_daemon::runtime_options::settle(&runtime_options, &runtime, &catalog).unwrap_or_else(|e| refuse(2, e)),
-    );
+    // Each runtime's options are checked against what its worker declares before any model loads.
+    superfluid_daemon::runtime_options::settle(&runtime_options, &runtime, &catalog).unwrap_or_else(|e| refuse(2, e));
     eprintln!("superfluid: runtime {} serves {} ({})", runtime.id.name(), model.display(), describe_worker(&runtime));
     if let Some(on) = spec_bitexact {
         std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });

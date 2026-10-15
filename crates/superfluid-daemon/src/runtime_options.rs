@@ -3,10 +3,11 @@
 //! and forwarded to the runtime's worker as `--<name> <value>`. They are set once per process
 //! after parsing, as `BASERT_LIB` is, so every worker spawned for that runtime gets them.
 
+use std::path::Path;
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
-use superfluid_adapter_kit::{check_value, placeholder};
+use superfluid_adapter_kit::{check_value, placeholder, WorkerArgs};
 
 use crate::runtime_pick::RuntimeId;
 use crate::runtimes::{Catalog, Runtime};
@@ -62,8 +63,61 @@ pub fn check(given: &[Given], runtime: &Runtime) -> Result<Vec<(String, String)>
     Ok(out)
 }
 
-/// The checked options per runtime, as the `--<name> <value>` pairs its worker takes.
+/// The options per runtime, as the `--<name> <value>` pairs its worker takes.
 pub type Settled = Vec<(RuntimeId, Vec<(String, String)>)>;
+
+/// The options as given, grouped by runtime, before any worker has declared what it takes:
+/// what the first probe of a runtime is started with, so an option that makes a runtime
+/// usable here (its library, its environment) counts from the start. The worker refuses an
+/// option it does not take or a value it does not accept.
+pub fn given_pairs(given: &[Given]) -> Settled {
+    let mut out: Settled = Vec::new();
+    for g in given {
+        let pair = (format!("--{}", g.name), g.value.clone());
+        match out.iter_mut().find(|(id, _)| *id == g.runtime) {
+            Some((_, pairs)) => pairs.push(pair),
+            None => out.push((g.runtime, vec![pair])),
+        }
+    }
+    out
+}
+
+/// When a runtime's probe failed with options given for it: the options' own fault, named
+/// as the daemon names it, when the worker answers without them and refuses them by its
+/// declaration; `None` when the runtime fails without them too.
+pub fn blamed(catalog: &Catalog, id: RuntimeId, given: &[Given]) -> Option<String> {
+    if !given.iter().any(|g| g.runtime == id.base()) {
+        return None;
+    }
+    let plain = catalog.locate_plain(id)?;
+    let rt = crate::runtimes::check_worker(id, &plain).ok()?;
+    check(given, &rt).err()
+}
+
+/// The arguments an in-process worker gets, built as a worker process parses its command
+/// line, so every option lands where the adapter reads it: `--venv` in its own field, the
+/// rest in `extra`.
+pub fn worker_args(id: RuntimeId, model: &Path, ctx: i32, max_batch: u32, kv_bits: i32) -> Result<WorkerArgs, String> {
+    worker_args_from(&for_runtime(id), model, ctx, max_batch, kv_bits)
+}
+
+pub fn worker_args_from(options: &[(String, String)], model: &Path, ctx: i32, max_batch: u32, kv_bits: i32) -> Result<WorkerArgs, String> {
+    let mut argv: Vec<String> = vec![
+        "--model".into(),
+        model.to_string_lossy().into_owned(),
+        "--max-context".into(),
+        ctx.to_string(),
+        "--max-batch".into(),
+        max_batch.to_string(),
+        "--kv-bits".into(),
+        kv_bits.to_string(),
+    ];
+    for (flag, value) in options {
+        argv.push(flag.clone());
+        argv.push(value.clone());
+    }
+    WorkerArgs::parse(&argv)
+}
 
 /// Every given option checked: against `primary` for its runtime, and against the catalog's
 /// record of any other runtime named, which must be usable here to be checked at all.
@@ -157,6 +211,33 @@ mod tests {
             default: default.into(),
             about: format!("about {name}"),
         }
+    }
+
+    #[test]
+    fn the_options_as_given_are_grouped_by_runtime_for_the_first_probe() {
+        let ids = [RuntimeId::new("llamacpp"), RuntimeId::new("mlx")];
+        let given = [
+            resolve("--llamacpp-lib", "/custom/lib", &ids).unwrap(),
+            resolve("--mlx-venv", "/custom/env", &ids).unwrap(),
+            resolve("--llamacpp-n-gpu-layers", "20", &ids).unwrap(),
+        ];
+        let pairs = given_pairs(&given);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], (ids[0], vec![("--lib".to_string(), "/custom/lib".to_string()), ("--n-gpu-layers".to_string(), "20".to_string())]));
+        assert_eq!(pairs[1], (ids[1], vec![("--venv".to_string(), "/custom/env".to_string())]));
+        assert!(given_pairs(&[]).is_empty());
+    }
+
+    #[test]
+    fn in_process_worker_arguments_are_parsed_as_a_worker_process_parses_them() {
+        let options = [("--venv".to_string(), "/custom/env".to_string()), ("--prefill-chunk".to_string(), "512".to_string())];
+        let args = worker_args_from(&options, Path::new("/m"), 4096, 8, 0).unwrap();
+        assert_eq!(args.venv.as_deref(), Some(Path::new("/custom/env")), "where the MLX adapter reads its environment");
+        assert_eq!(args.extra, [("--prefill-chunk".to_string(), "512".to_string())]);
+        assert_eq!((args.model.as_deref(), args.max_context, args.max_batch, args.kv_bits), (Some(Path::new("/m")), 4096, 8, 0));
+        let plain = worker_args_from(&[], Path::new("/m"), 2048, 4, 8).unwrap();
+        assert!(plain.venv.is_none() && plain.extra.is_empty() && plain.kv_bits == 8);
+        assert!(worker_args_from(&[("--lib".to_string(), String::new())], Path::new("/m"), 1, 1, 0).is_ok(), "a value is the parser's to take; the worker judges it");
     }
 
     #[test]

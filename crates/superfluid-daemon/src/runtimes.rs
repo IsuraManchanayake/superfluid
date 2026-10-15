@@ -117,10 +117,7 @@ impl Runtime {
             args.push("--kv-bits".to_string());
             args.push(kv_bits.to_string());
         }
-        for (flag, value) in crate::runtime_options::for_runtime(self.id) {
-            args.push(flag);
-            args.push(value);
-        }
+        // The runtime's own options are in the worker's prefix, from `locate`.
         args
     }
 
@@ -250,7 +247,19 @@ impl Catalog {
         ids
     }
 
+    /// The worker for `id`, started with the options `serve` was given for the runtime from
+    /// the first probe on, so an option that makes it usable here counts before it is required.
     pub fn locate(&self, id: RuntimeId) -> Option<Worker> {
+        let mut worker = self.locate_plain(id)?;
+        for (flag, value) in crate::runtime_options::for_runtime(id) {
+            worker.prefix.push(flag);
+            worker.prefix.push(value);
+        }
+        Some(worker)
+    }
+
+    /// The worker for `id` as found, with no option of the command line.
+    pub(crate) fn locate_plain(&self, id: RuntimeId) -> Option<Worker> {
         if let Some(install) = id.install() {
             let bin = self.package_dir(id).join(install).join("bin").join(worker_name(id));
             return std::fs::canonicalize(bin).ok().filter(|p| p.is_file()).map(|bin| Worker {
@@ -716,6 +725,44 @@ pub(crate) mod tests {
     }
 
     const V: u16 = superfluid_agent::client::PROTO_VERSION;
+
+    #[test]
+    fn a_worker_is_started_with_its_runtime_options_from_the_first_probe_on() {
+        // The options set for this process (first call wins; only this test sets them).
+        crate::runtime_options::set(vec![(RuntimeId::new("optrt"), vec![("--lib".to_string(), "/custom/lib".to_string())])]);
+        let root = std::env::temp_dir().join(format!("superfluid-runtime-options-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (beside, libexec) = (root.join("bin"), root.join("libexec").join("superfluid"));
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::create_dir_all(&libexec).unwrap();
+        // A worker that reports what it was started with.
+        let toy = libexec.join("superfluid-worker-optrt");
+        std::fs::write(&toy, "#!/bin/sh\nprintf '{\"runtime\":{\"id\":\"optrt\",\"version\":\"v1\"},\"received\":\"%s\"}\n' \"$*\"\n").unwrap();
+        std::fs::set_permissions(&toy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cat = Catalog::new(root.join("home"), Some(beside.clone()), beside.join("superfluid-workerd"));
+        let id = RuntimeId::new("optrt");
+        let w = cat.locate(id).unwrap();
+        assert_eq!(w.prefix, ["--lib", "/custom/lib"], "the options ride in the prefix");
+        assert!(cat.locate_plain(id).unwrap().prefix.is_empty());
+        let report = run_check_model(&w, None).unwrap();
+        assert_eq!(report["received"], "check --lib /custom/lib", "the first probe already carries them");
+        let rt = Runtime {
+            id,
+            worker: w,
+            version: None,
+            abi: None,
+            capabilities: None,
+            info: Info::default(),
+            devices: Vec::new(),
+            tokenizer: None,
+            pull: None,
+            options: Vec::new(),
+        };
+        let args = rt.serve_args(Path::new("/m"), 4096, 8, 0);
+        assert_eq!(args.iter().filter(|a| *a == "--lib").count(), 1, "once, from the prefix: {args:?}");
+        assert!(cat.locate(RuntimeId::new("otherrt")).is_none_or(|w| w.prefix.is_empty()), "another runtime's worker gets nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     pub(crate) fn toy_report(id: &str, available: &str) -> String {
         format!(

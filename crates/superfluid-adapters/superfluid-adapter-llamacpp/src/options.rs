@@ -118,6 +118,11 @@ const CACHE_TYPES: &[(&str, sys::ggml_type)] = &[
     ("iq4_nl", sys::GGML_TYPE_IQ4_NL),
 ];
 
+/// The cache types given, for pricing a cell before a model is loaded.
+pub fn cache_types(args: &WorkerArgs) -> Result<(Option<sys::ggml_type>, Option<sys::ggml_type>), String> {
+    Ok((choice(args, "cache-type-k", CACHE_TYPES)?, choice(args, "cache-type-v", CACHE_TYPES)?))
+}
+
 /// Sets every option given in `args` on `cfg`; the rest keep their defaults.
 pub fn apply(args: &WorkerArgs, cfg: &mut LlamaConfig) -> Result<(), String> {
     if let Some(n) = int(args, "n-gpu-layers", -1)? {
