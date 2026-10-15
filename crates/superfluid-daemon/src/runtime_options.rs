@@ -1,7 +1,5 @@
-//! `--<runtime>-<name> <value>` on `superfluid serve`: an option of one runtime, declared by its
-//! adapter (`Runtime::options`), checked here against that declaration before a worker starts,
-//! and forwarded to the runtime's worker as `--<name> <value>`. They are set once per process
-//! after parsing, as `BASERT_LIB` is, so every worker spawned for that runtime gets them.
+//! `--<runtime>-<name> <value>` on `superfluid serve`: an option of one runtime, checked against what its adapter
+//! declares and forwarded to its worker as `--<name> <value>`; set once per process, as `BASERT_LIB` is.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -21,8 +19,7 @@ pub struct Given {
     pub value: String,
 }
 
-/// Whether `flag` is shaped as a runtime option, `--<x>-<y>`: only then does `serve` keep it for
-/// [`resolve`] instead of refusing it on the spot.
+/// Whether `flag` is shaped as a runtime option, `--<x>-<y>`; only then does `serve` keep it for [`resolve`].
 pub fn looks_like(flag: &str) -> bool {
     let Some(body) = flag.strip_prefix("--") else { return false };
     let shaped = body.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_'));
@@ -43,8 +40,7 @@ pub fn resolve(flag: &str, value: &str, ids: &[RuntimeId]) -> Option<Given> {
     best.map(|(runtime, name)| Given { flag: flag.to_string(), runtime, name: name.to_string(), value: value.to_string() })
 }
 
-/// The options among `given` for `runtime`, checked against what its worker declares, as the
-/// `--<name> <value>` pairs its worker takes.
+/// The options among `given` for `runtime`, checked against its declarations, as the pairs its worker takes.
 pub fn check(given: &[Given], runtime: &Runtime) -> Result<Vec<(String, String)>, String> {
     let id = runtime.id.base();
     let mut out = Vec::new();
@@ -66,10 +62,8 @@ pub fn check(given: &[Given], runtime: &Runtime) -> Result<Vec<(String, String)>
 /// The options per runtime, as the `--<name> <value>` pairs its worker takes.
 pub type Settled = Vec<(RuntimeId, Vec<(String, String)>)>;
 
-/// The options as given, grouped by runtime, before any worker has declared what it takes:
-/// what the first probe of a runtime is started with, so an option that makes a runtime
-/// usable here (its library, its environment) counts from the start. The worker refuses an
-/// option it does not take or a value it does not accept.
+/// The options as given, grouped by runtime, for the first probe of a runtime: an option that makes it usable
+/// here (its library, its environment) counts from the start, and the worker refuses one it does not take.
 pub fn given_pairs(given: &[Given]) -> Settled {
     let mut out: Settled = Vec::new();
     for g in given {
@@ -82,9 +76,8 @@ pub fn given_pairs(given: &[Given]) -> Settled {
     out
 }
 
-/// When a runtime's probe failed with options given for it: the options' own fault, named
-/// as the daemon names it, when the worker answers without them and refuses them by its
-/// declaration; `None` when the runtime fails without them too.
+/// When a probe failed with options given: the option at fault, named as the daemon names it, when the worker
+/// answers without them; `None` when the runtime fails without them too.
 pub fn blamed(catalog: &Catalog, id: RuntimeId, given: &[Given]) -> Option<String> {
     if !given.iter().any(|g| g.runtime == id.base()) {
         return None;
@@ -94,24 +87,20 @@ pub fn blamed(catalog: &Catalog, id: RuntimeId, given: &[Given]) -> Option<Strin
     check(given, &rt).err()
 }
 
-/// The arguments an in-process worker gets, built as a worker process parses its command
-/// line, so every option lands where the adapter reads it: `--venv` in its own field, the
-/// rest in `extra`.
+/// The arguments an in-process worker gets, parsed as a worker process parses them, so `--venv` lands in its field.
 pub fn worker_args(id: RuntimeId, model: &Path, ctx: i32, max_batch: u32, kv_bits: i32) -> Result<WorkerArgs, String> {
     worker_args_from(&for_runtime(id), model, ctx, max_batch, kv_bits)
 }
 
-/// The arguments an in-process pull gets: the runtime's options alone, parsed as a worker
-/// process parses them, so the pull runs in the environment the serve will.
+/// The arguments an in-process pull gets: the runtime's options alone, parsed as a worker process parses them.
 pub fn pull_args(id: RuntimeId) -> Result<WorkerArgs, String> {
     let options = for_runtime(id);
     let argv: Vec<String> = options.iter().flat_map(|(f, v)| [f.clone(), v.clone()]).collect();
     WorkerArgs::parse(&argv)
 }
 
-/// What the daemon's own process must carry for the libraries it loads in process: the
-/// llama.cpp tokenizer library finds libllama as the worker does, by `SUPERFLUID_LLAMA_LIB`
-/// when the command line names a library, since the worker's `--lib` never reaches it.
+/// What this process must carry for the libraries it loads itself: the llama.cpp tokenizer finds libllama by
+/// `SUPERFLUID_LLAMA_LIB`, since the worker's `--lib` never reaches it.
 pub fn daemon_environment(settled: &Settled) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     for (id, options) in settled {
@@ -151,8 +140,7 @@ pub fn worker_args_from(options: &[(String, String)], model: &Path, ctx: i32, ma
     WorkerArgs::parse(&argv)
 }
 
-/// Every given option checked: against `primary` for its runtime, and against the catalog's
-/// record of any other runtime named, which must be usable here to be checked at all.
+/// Every given option checked: against `primary` for its runtime, and against any other runtime named, which must be usable here.
 pub fn settle(given: &[Given], primary: &Runtime, catalog: &Catalog) -> Result<Settled, String> {
     let mut ids: Vec<RuntimeId> = given.iter().map(|g| g.runtime).collect();
     ids.sort();

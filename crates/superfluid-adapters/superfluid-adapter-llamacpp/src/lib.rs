@@ -39,7 +39,6 @@ impl Runtime for Llamacpp {
     }
 
     fn flags(&self) -> &'static [&'static str] {
-        // `--lib` is the option; `--llama-lib` is its older spelling on the worker's command line.
         &["--llama-lib"]
     }
 
@@ -89,7 +88,6 @@ impl Runtime for Llamacpp {
     }
 
     fn sizing(&self, path: &Path, args: &WorkerArgs) -> Option<Result<Sizing, String>> {
-        // A cell is priced by the cache types the command line chose, as the load will be.
         Some(options::cache_types(args).and_then(|(k, v)| runtime::sizing(path, k, v)))
     }
 

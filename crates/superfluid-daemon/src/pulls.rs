@@ -67,8 +67,7 @@ pub fn ensure_installed(catalog: &Catalog, runtime: RuntimeId, offline: bool) ->
     }
 }
 
-/// `pull`, the worker's prefix (its runtime options, from `Catalog::locate`), then the pull's own
-/// arguments; the worker takes its options apart from the pull's.
+/// `pull`, the worker's prefix (its runtime options), then the pull's own arguments.
 pub fn pull_command_args(worker: &crate::runtimes::Worker, request: &Pull) -> Vec<String> {
     let mut args = vec!["pull".to_string()];
     args.extend(worker.prefix.iter().cloned());
@@ -85,8 +84,6 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
     let request = Pull { id: id.to_string(), offline: flags.offline, options: flags.options.clone() };
     let _one_at_a_time = Lock::take(&catalog.home().join("pulls"), id, &format!("pull of {id}"))?;
     eprintln!("superfluid: pulling {id} with the {runtime} runtime{}", if flags.offline { " (offline)" } else { "" });
-    // The pull runs in the runtime the options set up (its library, its environment), as the
-    // check before it and the serve after it do.
     let path = if rt.worker.source == Source::BuiltIn {
         let linked = crate::linked::get(runtime.base()).ok_or_else(|| format!("this build does not link the {runtime} runtime"))?;
         linked.pull(&request, &crate::runtime_options::pull_args(runtime.base())?)?

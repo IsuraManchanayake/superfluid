@@ -419,8 +419,7 @@ struct KvShape {
     type_v: Option<sys::ggml_type>,
 }
 
-/// The bytes one row of `elems` takes in the cache type `t`: ggml's row size, a block of
-/// elements at a time for the quantized types.
+/// The bytes one row of `elems` takes in the cache type `t`: ggml's row size, by block for the quantized types.
 fn row_bytes(elems: u64, t: Option<sys::ggml_type>) -> u64 {
     let (block, bytes) = match t {
         None | Some(sys::GGML_TYPE_F16) | Some(sys::GGML_TYPE_BF16) => (1, 2),
@@ -511,9 +510,8 @@ fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path, type_k:
     .cell_bytes()
 }
 
-/// What the saved state is keyed by: the weights, and the context settings that change what
-/// a cached key or value means (RoPE and YaRN) or how it is stored (the cache types). With
-/// none of them set the key is the weights alone, as it was before the settings existed.
+/// What the saved state is keyed by: the weights, and the settings that change what a cached key means (RoPE, YaRN) or
+/// how it is stored (the cache types); with none set, the weights alone, as before.
 fn state_identity(weights: [u8; 32], cfg: &LlamaConfig) -> [u8; 32] {
     let mut settings: Vec<u8> = Vec::new();
     let mut put = |tag: u8, v: Option<i64>| {
@@ -1733,7 +1731,6 @@ mod kv_shape_tests {
         assert_eq!(f16.cell_bytes(), 28 * 8 * 256 * 2, "llama.cpp's default, f16");
         assert_eq!(typed(sys::GGML_TYPE_F32, sys::GGML_TYPE_F32).cell_bytes(), 2 * f16.cell_bytes(), "f32 is twice f16");
         assert_eq!(typed(sys::GGML_TYPE_BF16, sys::GGML_TYPE_F16).cell_bytes(), f16.cell_bytes());
-        // Quantized rows go by ggml's block sizes: q8_0 is 34 bytes per 32 elements, q4_0 18.
         assert_eq!(row_bytes(128, Some(sys::GGML_TYPE_Q8_0)), 4 * 34);
         assert_eq!(row_bytes(128, Some(sys::GGML_TYPE_Q4_0)), 4 * 18);
         assert_eq!(row_bytes(100, Some(sys::GGML_TYPE_Q5_1)), 4 * 24, "a partial block is a whole one");

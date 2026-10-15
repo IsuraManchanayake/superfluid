@@ -247,8 +247,7 @@ impl Catalog {
         ids
     }
 
-    /// The worker for `id`, started with the options `serve` was given for the runtime from
-    /// the first probe on, so an option that makes it usable here counts before it is required.
+    /// The worker for `id`, started with the runtime's options from the first probe on.
     pub fn locate(&self, id: RuntimeId) -> Option<Worker> {
         let mut worker = self.locate_plain(id)?;
         for (flag, value) in crate::runtime_options::for_runtime(id) {
@@ -735,7 +734,6 @@ pub(crate) mod tests {
         let (beside, libexec) = (root.join("bin"), root.join("libexec").join("superfluid"));
         std::fs::create_dir_all(&beside).unwrap();
         std::fs::create_dir_all(&libexec).unwrap();
-        // A worker that reports what it was started with.
         let toy = libexec.join("superfluid-worker-optrt");
         std::fs::write(&toy, "#!/bin/sh\nprintf '{\"runtime\":{\"id\":\"optrt\",\"version\":\"v1\"},\"received\":\"%s\"}\n' \"$*\"\n").unwrap();
         std::fs::set_permissions(&toy, std::fs::Permissions::from_mode(0o755)).unwrap();

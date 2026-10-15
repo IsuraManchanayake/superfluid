@@ -173,9 +173,7 @@ impl Runtime for Mlx {
     }
 }
 
-/// The options `superfluid serve` takes for this runtime, as `--mlx-<name> <value>`. The worker
-/// drives mlx-lm's model classes with an executor of its own, so the knobs are the executor's;
-/// the context window, the lanes and sampling are superfluid's flags.
+/// The options `superfluid serve` takes for this runtime, as `--mlx-<name> <value>`: the knobs of the worker's own executor.
 pub mod options {
     use superfluid_adapter_kit::{option, OptionKind, ServeOption, WorkerArgs};
 

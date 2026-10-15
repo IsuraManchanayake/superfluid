@@ -1,7 +1,5 @@
-//! The options `superfluid serve` takes for this runtime, as `--llamacpp-<name> <value>`: the
-//! knobs of llama.cpp's model and context parameters that keep their meaning under superfluid,
-//! which owns the context window (`--max-context`), the lanes (`--max-batch`, `n_seq_max`), the
-//! KV layout (`kv_unified`) and sampling. Each is named as llama.cpp's own tools name it.
+//! The options `superfluid serve` takes for this runtime, as `--llamacpp-<name> <value>`: llama.cpp's model and context
+//! parameters that keep their meaning under superfluid, which owns the context window, the lanes, the KV layout and sampling.
 
 use superfluid_adapter_kit::{option, OptionKind, ServeOption, WorkerArgs};
 
@@ -230,8 +228,7 @@ mod tests {
     #[test]
     fn the_declaration_is_one_the_daemon_honours() {
         superfluid_adapter_kit::check_declaration(OPTIONS).unwrap();
-        // The floors the daemon checks are the ones `apply` holds, so a value the daemon lets
-        // through is one the worker takes.
+        // The floors the daemon checks are the ones `apply` holds.
         for (name, least) in [("n-gpu-layers", -1), ("batch-size", 1), ("ubatch-size", 1), ("threads", 0), ("main-gpu", 0)] {
             let o = OPTIONS.iter().find(|o| o.name == name).unwrap();
             assert_eq!(o.kind.least(), Some(least), "{name}");

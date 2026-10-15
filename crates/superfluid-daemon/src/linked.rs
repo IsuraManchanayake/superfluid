@@ -83,8 +83,6 @@ pub fn tokenizer(id: RuntimeId, model: &Path) -> Option<Result<Arc<dyn superflui
 
 pub fn spawn(id: RuntimeId, model: PathBuf, ctx: i32, max_batch: u32, kv_bits: i32) -> Option<Result<crate::EngineHost, String>> {
     let runtime = get(id)?;
-    // Built as a worker process parses its command line, so each option lands where the
-    // adapter reads it.
     let args = match crate::runtime_options::worker_args(id, &model, ctx, max_batch, kv_bits) {
         Ok(args) => args,
         Err(e) => return Some(Err(e)),

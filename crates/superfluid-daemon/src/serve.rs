@@ -228,8 +228,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut fleet_policy = String::from("load-aware");
     let mut fleet_pool_high: u32 = superfluid_daemon::fleet_manager::DEFAULT_POOL_HIGH_PCT;
     let mut fleet_conns: usize = superfluid_daemon::fleet_manager::DEFAULT_CONNS_PER_NODE;
-    // `--<runtime>-<name> <value>`: an option of one runtime, kept as given and resolved once
-    // the catalog says which runtimes are here (see runtime_options).
+    // A runtime's option, kept as given and resolved once the catalog says which runtimes are here.
     let mut option_candidates: Vec<(String, Option<String>)> = Vec::new();
     let args = superfluid_daemon::cli::split_equals(args, superfluid_daemon::cli::serve_takes_value);
     let mut it = args.iter();
@@ -566,9 +565,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             })
             .collect()
     };
-    // Every worker this process starts gets its runtime's options, the first probe included,
-    // so an option that makes a runtime usable here counts before the runtime is required.
-    // Each is checked against what the worker declares once the runtime answers.
+    // Set before the runtime is required, so an option that makes it usable here counts for the first probe.
     superfluid_daemon::runtime_options::set(superfluid_daemon::runtime_options::given_pairs(&runtime_options));
     // The llama.cpp tokenizer this process loads finds its library the way the worker does.
     superfluid_daemon::runtime_options::export_to_daemon();

@@ -28,9 +28,8 @@ pub struct PullOption {
     pub about: &'static str,
 }
 
-/// An option of one runtime, given to `superfluid serve` as `--<runtime>-<name> <value>` and
-/// to the worker as `--<name> <value>`: a knob of the runtime itself, with no meaning on
-/// another. A knob every runtime could take is a flag of `serve` instead.
+/// An option of one runtime, given to `superfluid serve` as `--<runtime>-<name> <value>` and to the worker as
+/// `--<name> <value>`; a knob every runtime could take is a flag of `serve` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServeOption {
     pub name: &'static str,
@@ -40,8 +39,7 @@ pub struct ServeOption {
     pub about: &'static str,
 }
 
-/// What a value of an option may be. The daemon refuses another before a worker starts, and the
-/// worker before anything loads.
+/// What a value of an option may be; the daemon and the worker both refuse another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionKind {
     Int,
@@ -84,8 +82,7 @@ impl OptionKind {
     }
 }
 
-/// Whether `value` is one an option of `kind` takes, `kind`, `choices` and `least` as a report
-/// spells them.
+/// Whether `value` is one an option of `kind` takes, with `kind`, `choices` and `least` as a report spells them.
 pub fn check_value(kind: &str, choices: &[impl AsRef<str>], least: Option<i64>, value: &str) -> Result<(), String> {
     let list = || choices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
     let ok = match kind {
@@ -124,8 +121,7 @@ pub fn option<'a>(args: &'a WorkerArgs, name: &str) -> Option<&'a str> {
     args.extra(&format!("--{name}"))
 }
 
-/// Flags of every worker an option may not be named after: the parser reads them into the
-/// executor's own settings before an adapter sees them.
+/// Flags of every worker an option may not be named after: the parser reads them before an adapter sees them.
 const RESERVED: &[&str] = &["model", "max-context", "max-batch", "kv-bits", "frames-fd", "fd-channel-fd", "engine"];
 
 /// Refuses a declaration the daemon or the worker could not honour.
@@ -345,10 +341,8 @@ pub trait Runtime: Send + Sync {
         &[]
     }
 
-    /// The options this runtime takes on `superfluid serve`, as `--<id>-<name> <value>`: knobs
-    /// of the runtime itself. The daemon checks a value against its kind before a worker
-    /// starts, forwards it as `--<name> <value>`, and lists them in `superfluid runtime
-    /// options <id>`; the adapter reads them with [`option`].
+    /// The options this runtime takes on `superfluid serve`, as `--<id>-<name> <value>`: the daemon checks a value
+    /// against its kind, forwards it as `--<name> <value>`, and lists them in `superfluid runtime options <id>`.
     fn options(&self) -> &'static [ServeOption] {
         &[]
     }
@@ -644,9 +638,7 @@ fn pull_command(rt: &dyn Runtime, name: &str, args: &[String]) -> ! {
     }
 }
 
-/// A pull's command line, split into the worker's own flags and options (which
-/// set up the runtime the pull runs in: its library, its environment) and the
-/// pull's arguments.
+/// A pull's command line: the worker's own flags and options, which set up the runtime, then the pull's arguments.
 pub fn split_pull_args(rt: &dyn Runtime, args: &[String]) -> (Vec<String>, Vec<String>) {
     let flags = worker_flags(rt);
     let (mut worker, mut pull_args) = (Vec::new(), Vec::new());
