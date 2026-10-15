@@ -210,7 +210,11 @@ fn sizes_here(backend: &str, integrated: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn sizing(path: &std::path::Path) -> Result<superfluid_executor::sizing::Sizing, String> {
+pub fn sizing(
+    path: &std::path::Path,
+    type_k: Option<sys::ggml_type>,
+    type_v: Option<sys::ggml_type>,
+) -> Result<superfluid_executor::sizing::Sizing, String> {
     use superfluid_executor::sizing::{Sizing, PLANNING_SHARE};
     let device = offload_memory().ok_or_else(|| {
         "llama.cpp registers no GPU here, so there is no device memory to size a window against".to_string()
@@ -253,7 +257,7 @@ pub fn sizing(path: &std::path::Path) -> Result<superfluid_executor::sizing::Siz
     Ok(Sizing {
         budget_bytes: device.free.min((PLANNING_SHARE * device.total as f64) as u64),
         weight_bytes: weights,
-        kv_bytes_per_token: kv_cell_bytes(model, path),
+        kv_bytes_per_token: kv_cell_bytes(model, path, type_k, type_v),
         trained_context: trained,
     })
 }
@@ -410,6 +414,25 @@ struct KvShape {
     recurrent_layers: Option<Vec<u32>>,
     attention_interval: Option<u64>,
     shared_kv_layers: u64,
+    /// The cache types chosen (`--llamacpp-cache-type-k/-v`); `None` is llama.cpp's f16.
+    type_k: Option<sys::ggml_type>,
+    type_v: Option<sys::ggml_type>,
+}
+
+/// The bytes one row of `elems` takes in the cache type `t`: ggml's row size, a block of
+/// elements at a time for the quantized types.
+fn row_bytes(elems: u64, t: Option<sys::ggml_type>) -> u64 {
+    let (block, bytes) = match t {
+        None | Some(sys::GGML_TYPE_F16) | Some(sys::GGML_TYPE_BF16) => (1, 2),
+        Some(sys::GGML_TYPE_F32) => (1, 4),
+        Some(sys::GGML_TYPE_Q8_0) => (32, 34),
+        Some(sys::GGML_TYPE_Q4_0) | Some(sys::GGML_TYPE_IQ4_NL) => (32, 18),
+        Some(sys::GGML_TYPE_Q4_1) => (32, 20),
+        Some(sys::GGML_TYPE_Q5_0) => (32, 22),
+        Some(sys::GGML_TYPE_Q5_1) => (32, 24),
+        Some(_) => (1, 2),
+    };
+    elems.div_ceil(block) * bytes
 }
 
 impl KvShape {
@@ -442,13 +465,13 @@ impl KvShape {
                 (Some(swa), _) => (self.full.0.max(swa.0), self.full.1.max(swa.1)),
                 (None, _) => self.full,
             };
-            bytes += heads * (k + v) * 2;
+            bytes += heads * (row_bytes(k, self.type_k) + row_bytes(v, self.type_v));
         }
         bytes.max(1)
     }
 }
 
-fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path) -> u64 {
+fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path, type_k: Option<sys::ggml_type>, type_v: Option<sys::ggml_type>) -> u64 {
     // SAFETY: the model is live.
     let (n_layer, n_embd, n_head, n_head_kv) = unsafe {
         (
@@ -482,8 +505,43 @@ fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path) -> u64 
         recurrent_layers,
         attention_interval,
         shared_kv_layers: get("attention.shared_kv_layers").unwrap_or(0),
+        type_k,
+        type_v,
     }
     .cell_bytes()
+}
+
+/// What the saved state is keyed by: the weights, and the context settings that change what
+/// a cached key or value means (RoPE and YaRN) or how it is stored (the cache types). With
+/// none of them set the key is the weights alone, as it was before the settings existed.
+fn state_identity(weights: [u8; 32], cfg: &LlamaConfig) -> [u8; 32] {
+    let mut settings: Vec<u8> = Vec::new();
+    let mut put = |tag: u8, v: Option<i64>| {
+        if let Some(v) = v {
+            settings.push(tag);
+            settings.extend_from_slice(&v.to_le_bytes());
+        }
+    };
+    let bits = |f: Option<f32>| f.map(|f| i64::from(f.to_bits()));
+    put(1, cfg.rope_scaling.map(i64::from));
+    put(2, bits(cfg.rope_freq_base));
+    put(3, bits(cfg.rope_freq_scale));
+    put(4, bits(cfg.yarn_ext_factor));
+    put(5, bits(cfg.yarn_attn_factor));
+    put(6, bits(cfg.yarn_beta_fast));
+    put(7, bits(cfg.yarn_beta_slow));
+    put(8, cfg.yarn_orig_ctx.map(i64::from));
+    put(9, cfg.type_k.map(i64::from));
+    put(10, cfg.type_v.map(i64::from));
+    if settings.is_empty() {
+        return weights;
+    }
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    h.update(&weights);
+    h.update(&settings);
+    let mut out = weights;
+    out[..16].copy_from_slice(&h.digest128().to_le_bytes());
+    out
 }
 
 fn reads_recurrent_layout(arch: &str) -> bool {
@@ -622,7 +680,7 @@ impl LlamaRuntime {
         if model.is_null() {
             return Err(LlamaError::Load(with_reason(cfg.model_path.display().to_string())));
         }
-        let kv_bytes_per_token = kv_cell_bytes(model, &cfg.model_path);
+        let kv_bytes_per_token = kv_cell_bytes(model, &cfg.model_path, cfg.type_k, cfg.type_v);
         // SAFETY: model is live; const reads.
         let recurrent = unsafe { sys::llama_model_is_recurrent(model) || sys::llama_model_is_hybrid(model) };
         let arch = meta(model, "general.architecture").unwrap_or_default();
@@ -774,7 +832,7 @@ impl LlamaRuntime {
             (sys::llama_model_get_vocab(model), sys::llama_get_memory(ctx), sys::llama_n_ctx(ctx), sys::llama_n_ctx_seq(ctx))
         };
         let identity = match identity.join().unwrap_or_else(|_| Err(LlamaError::Load("hashing the weights panicked".into()))) {
-            Ok(id) => id,
+            Ok(id) => state_identity(id, &cfg),
             Err(e) => {
                 // SAFETY: ctx and model are live and owned here, and freed once.
                 unsafe {
@@ -1665,6 +1723,46 @@ mod kv_shape_tests {
         for arch in ["falcon-h1", "lfm2", "llama", "gemma4", "qwen3", "qwen4exp", ""] {
             assert!(!reads_recurrent_layout(arch), "{arch}");
         }
+    }
+
+    #[test]
+    fn a_cell_is_priced_by_the_cache_types_chosen() {
+        use super::{row_bytes, sys};
+        let f16 = KvShape { n_layer: 28, head_kv: 8, full: (128, 128), ..Default::default() };
+        let typed = |k, v| KvShape { type_k: Some(k), type_v: Some(v), ..f16.clone() };
+        assert_eq!(f16.cell_bytes(), 28 * 8 * 256 * 2, "llama.cpp's default, f16");
+        assert_eq!(typed(sys::GGML_TYPE_F32, sys::GGML_TYPE_F32).cell_bytes(), 2 * f16.cell_bytes(), "f32 is twice f16");
+        assert_eq!(typed(sys::GGML_TYPE_BF16, sys::GGML_TYPE_F16).cell_bytes(), f16.cell_bytes());
+        // Quantized rows go by ggml's block sizes: q8_0 is 34 bytes per 32 elements, q4_0 18.
+        assert_eq!(row_bytes(128, Some(sys::GGML_TYPE_Q8_0)), 4 * 34);
+        assert_eq!(row_bytes(128, Some(sys::GGML_TYPE_Q4_0)), 4 * 18);
+        assert_eq!(row_bytes(100, Some(sys::GGML_TYPE_Q5_1)), 4 * 24, "a partial block is a whole one");
+        assert_eq!(typed(sys::GGML_TYPE_Q8_0, sys::GGML_TYPE_Q4_0).cell_bytes(), 28 * 8 * (4 * 34 + 4 * 18));
+        assert!(typed(sys::GGML_TYPE_Q4_0, sys::GGML_TYPE_Q4_0).cell_bytes() * 3 < f16.cell_bytes(), "q4 is under a third of f16");
+    }
+
+    #[test]
+    fn the_state_identity_changes_with_rope_yarn_and_cache_types_and_not_otherwise() {
+        use super::{state_identity, sys, LlamaConfig};
+        let weights = [7u8; 32];
+        let plain = LlamaConfig::default();
+        assert_eq!(state_identity(weights, &plain), weights, "no setting: the weights alone, as before");
+        let same_meaning = LlamaConfig { n_gpu_layers: 0, flash_attn: Some(sys::LLAMA_FLASH_ATTN_TYPE_ENABLED), ..LlamaConfig::default() };
+        assert_eq!(state_identity(weights, &same_meaning), weights, "settings that do not change what a cached key means");
+        let base = LlamaConfig { rope_freq_base: Some(1_000_000.0), ..LlamaConfig::default() };
+        let other_base = LlamaConfig { rope_freq_base: Some(500_000.0), ..LlamaConfig::default() };
+        let scaled = LlamaConfig { rope_freq_scale: Some(0.25), ..LlamaConfig::default() };
+        let yarn = LlamaConfig { rope_scaling: Some(sys::LLAMA_ROPE_SCALING_TYPE_YARN), yarn_orig_ctx: Some(32768), ..LlamaConfig::default() };
+        let q8 = LlamaConfig { type_k: Some(sys::GGML_TYPE_Q8_0), ..LlamaConfig::default() };
+        let ids = [weights, state_identity(weights, &base), state_identity(weights, &other_base), state_identity(weights, &scaled), state_identity(weights, &yarn), state_identity(weights, &q8)];
+        for (i, a) in ids.iter().enumerate() {
+            for (j, b) in ids.iter().enumerate() {
+                assert_eq!(a == b, i == j, "identities {i} and {j}");
+            }
+        }
+        assert_eq!(state_identity(weights, &base), state_identity(weights, &base.clone()), "the same settings, the same key");
+        assert_eq!(state_identity(weights, &base)[16..], weights[16..], "the size bytes stay");
+        assert_ne!(state_identity([1u8; 32], &base), state_identity(weights, &base), "other weights, another key");
     }
 
     #[test]

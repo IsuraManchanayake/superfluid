@@ -90,8 +90,9 @@ impl Runtime for Llamacpp {
         Some(model_facts(path).map_err(|e| e.to_string()))
     }
 
-    fn sizing(&self, path: &Path, _args: &WorkerArgs) -> Option<Result<Sizing, String>> {
-        Some(runtime::sizing(path))
+    fn sizing(&self, path: &Path, args: &WorkerArgs) -> Option<Result<Sizing, String>> {
+        // A cell is priced by the cache types the command line chose, as the load will be.
+        Some(options::cache_types(args).and_then(|(k, v)| runtime::sizing(path, k, v)))
     }
 
     fn open(&self, args: &WorkerArgs) -> Result<Loaded, String> {
