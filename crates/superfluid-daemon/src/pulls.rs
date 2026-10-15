@@ -67,6 +67,15 @@ pub fn ensure_installed(catalog: &Catalog, runtime: RuntimeId, offline: bool) ->
     }
 }
 
+/// `pull`, the worker's prefix (its runtime options, from `Catalog::locate`), then the pull's own
+/// arguments; the worker takes its options apart from the pull's.
+pub fn pull_command_args(worker: &crate::runtimes::Worker, request: &Pull) -> Vec<String> {
+    let mut args = vec!["pull".to_string()];
+    args.extend(worker.prefix.iter().cloned());
+    args.extend(request.to_args());
+    args
+}
+
 pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) -> Result<PathBuf, String> {
     let rt = ensure_installed(catalog, runtime, flags.offline)?;
     let Some(declared) = &rt.pull else {
@@ -76,12 +85,14 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
     let request = Pull { id: id.to_string(), offline: flags.offline, options: flags.options.clone() };
     let _one_at_a_time = Lock::take(&catalog.home().join("pulls"), id, &format!("pull of {id}"))?;
     eprintln!("superfluid: pulling {id} with the {runtime} runtime{}", if flags.offline { " (offline)" } else { "" });
+    // The pull runs in the runtime the options set up (its library, its environment), as the
+    // check before it and the serve after it do.
     let path = if rt.worker.source == Source::BuiltIn {
         let linked = crate::linked::get(runtime.base()).ok_or_else(|| format!("this build does not link the {runtime} runtime"))?;
-        linked.pull(&request, &superfluid_adapter_kit::WorkerArgs::default())?
+        linked.pull(&request, &crate::runtime_options::pull_args(runtime.base())?)?
     } else {
         let mut cmd = std::process::Command::new(&rt.worker.bin);
-        cmd.arg("pull").args(request.to_args()).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::inherit());
+        cmd.args(pull_command_args(&rt.worker, &request)).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::inherit());
         let out = crate::exec::when_not_busy(|| cmd.output()).map_err(|e| format!("{} could not start: {e}", rt.worker.bin.display()))?;
         if !out.status.success() {
             return Err(format!("pulling {id} with the {runtime} runtime failed (its reason is above)"));
