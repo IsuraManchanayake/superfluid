@@ -29,7 +29,7 @@ superfluid runtime remove llamacpp b11284-vulkan
 |---|---|
 | `install <id>` | plan, fetch, verify and place an install. Options: `--version V`, `--backend B` (no fallback), `--from <archive>` (a URL or path to your own archive or, for MLX, package index), `--sha256 H`, `--untested`, `--dry-run` |
 | `update <id>` | install the newest tested build for the default install's backend beside it and make it the default |
-| `repair <id> [<install>]` | reinstall the same version and backend; what an upgraded daemon asks for when an install's worker is too old |
+| `repair <id> [<install>]` | reinstall the same version and backend; what a daemon updated with `superfluid self update` asks for when an install's worker is too old |
 | `remove <id> [<install>]` | remove one install, or all of them |
 | `use <id> <install>` / `--auto` | pin the default install / return to ranking |
 

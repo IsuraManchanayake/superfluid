@@ -48,7 +48,7 @@ Each release carries `compat.json` beside its tarball (and inside it), the same 
 {"superfluid": "0.1.3", "runtimes": {"basert": {"basert_version": "0.4.0", "abi": 1, "unnumbered_minor": "0.3"}}}
 ```
 
-A host that installs superfluid picks the newest release whose `runtimes.basert.abi` equals its engine's number; a superfluid release that states no number (0.1.2 and older) serves 0.3.x engines only. The verdict above remains the final word once the release is installed. The other direction works the same way: baseRT's releases carry the engine's number beside each bundle, as `basert-engine-abi-<N>.txt`, and `superfluid runtime install basert` picks the newest engine with this build's number, or a 0.3.x engine, from the release listing alone.
+A host that installs superfluid picks the newest release whose `runtimes.basert.abi` equals its engine's number (each release also carries that number in an asset name, `superfluid-basert-abi-<N>.txt`, so the listing alone says it); a superfluid release that states no number (0.1.2 and older) serves 0.3.x engines only. The verdict above remains the final word once the release is installed. The other direction works the same way: baseRT's releases carry the engine's number beside each bundle, as `basert-engine-abi-<N>.txt`, and `superfluid runtime install basert` picks the newest engine with this build's number, or a 0.3.x engine, from the release listing alone.
 
 ## Exit codes
 

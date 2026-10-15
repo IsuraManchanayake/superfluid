@@ -6,9 +6,12 @@
 # Environment:
 #   SUPERFLUID_VERSION  a release tag (v0.1.0); default: the latest release
 #   SUPERFLUID_NO_BASERT  set to skip installing the baseRT engine
-#   SUPERFLUID_PREFIX   where to install; default: ~/.local (bin/ and libexec/superfluid/ under it)
+#   SUPERFLUID_PREFIX   where the `superfluid` command goes; default: ~/.local (its bin/)
+#   SUPERFLUID_HOME     where releases are kept, side by side; default: ~/.superfluid (versions/)
 #
-# Nothing runs as root and nothing outside the prefix is touched. The baseRT
+# Nothing runs as root. The release is unpacked under $SUPERFLUID_HOME/versions
+# and $SUPERFLUID_PREFIX/bin/superfluid links to it, so `superfluid self update`
+# can install the next release beside it and go back if needed. The baseRT
 # engine is installed where it runs (Apple silicon, Linux arm64 with CUDA);
 # llama.cpp and MLX install themselves the first time a model needs them.
 set -eu
@@ -58,10 +61,18 @@ have="$(sha256 "$tmp/$name.tar.gz")"
 [ "$want" = "$have" ] || fail "checksum mismatch: expected $want, got $have"
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
-mkdir -p "$PREFIX/bin" "$PREFIX/libexec/superfluid"
-cp "$tmp/$name"/bin/* "$PREFIX/bin/"
-cp "$tmp/$name"/libexec/superfluid/* "$PREFIX/libexec/superfluid/"
-chmod +x "$PREFIX"/bin/superfluid* "$PREFIX"/libexec/superfluid/superfluid-worker-*
+chmod +x "$tmp/$name"/bin/superfluid* "$tmp/$name"/libexec/superfluid/superfluid-worker-*
+# The release places itself: under $SUPERFLUID_HOME/versions, with links in the
+# prefix. A release from before `self install` existed is copied in place.
+if "$tmp/$name/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin"; then
+  :
+else
+  say "this release places itself the old way: copied into ${PREFIX/#$HOME/~}/bin"
+  mkdir -p "$PREFIX/bin" "$PREFIX/libexec/superfluid"
+  cp "$tmp/$name"/bin/* "$PREFIX/bin/"
+  cp "$tmp/$name"/libexec/superfluid/* "$PREFIX/libexec/superfluid/"
+  chmod +x "$PREFIX"/bin/superfluid* "$PREFIX"/libexec/superfluid/superfluid-worker-*
+fi
 
 say "installed $("$PREFIX/bin/superfluid" --version) to ${PREFIX/#$HOME/~}/bin"
 

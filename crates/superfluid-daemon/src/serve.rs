@@ -1645,6 +1645,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
     if let Some(addr) = http {
         let http_listener = listen_or_exit("--http", &addr);
         eprintln!("superfluid: openai api on http://{addr}{}", embedding.http.also_served());
+        // Once a day, one line when a newer superfluid is out; never before the server is up.
+        superfluid_daemon::selfupdate::check_in_background(catalog.home().to_path_buf(), pull_flags.offline);
         if nonstream_keepalive > 0 {
             eprintln!(
                 "superfluid: non-streaming keep-alive on: 200 at admission, then a space every \
