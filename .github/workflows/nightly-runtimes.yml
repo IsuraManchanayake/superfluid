@@ -207,17 +207,20 @@ jobs:
           echo "SUPERFLUID_MLX_VENV=$env" >> "$GITHUB_ENV"
           echo "PYO3_PYTHON=$RUNNER_TEMP/mlx/python/bin/python3" >> "$GITHUB_ENV"
 
-      - name: What pip resolved for it, for the recipe
-        # The same interpreter the install used, so the report names the
-        # wheels for Python 3.12 on macOS arm64, which the recipe pins.
+      - name: Install it again with a report, so the recipe records what the tests run on
+        # Not a dry run: pip installs the environment the tests then use and
+        # reports exactly that, wheel by wheel. A resolution made separately
+        # could differ from the install if a package were released or yanked
+        # in between, and the recipe would then pin something untested.
         run: |
           set -euo pipefail
           py="$SUPERFLUID_MLX_VENV/bin/python"
           [ -x "$py" ] || py="$SUPERFLUID_MLX_VENV/bin/python3"
           "$py" -m pip --version >/dev/null 2>&1 || "$py" -m ensurepip --upgrade >/dev/null
-          "$py" -m pip install --dry-run --ignore-installed --only-binary=:all: \
+          "$py" -m pip install --ignore-installed --only-binary=:all: \
             --report "$RUNNER_TEMP/mlx-report.json" "mlx==$VERSION" mlx-lm >/dev/null
-          python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["install"]), "distributions resolved")' "$RUNNER_TEMP/mlx-report.json"
+          "$py" -c 'import mlx.core, mlx_lm' || { echo "::error::the reinstalled environment does not import mlx and mlx-lm"; exit 1; }
+          python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["install"]), "distributions installed and reported")' "$RUNNER_TEMP/mlx-report.json"
 
       - name: The adapter's tests on it
         run: |
