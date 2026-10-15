@@ -147,14 +147,32 @@ impl Versions {
         Ok(gone)
     }
 
+    /// The names in `prefix` that are the install script's real files, not links.
+    fn legacy_files(&self, prefix: &Path) -> Vec<&'static str> {
+        LINKED.iter().copied().filter(|name| prefix.join(name).symlink_metadata().is_ok_and(|m| m.file_type().is_file())).collect()
+    }
+
     /// The links in `prefix`: each of superfluid, superfluid-workerd and
     /// superfluid-noded through `current`, and `superfluid-<v>` per version
-    /// here. A file that is not a link into this directory is replaced only
-    /// when `replace_files` (the in-place installer's copies, on migration).
+    /// here. The install script's real files are replaced when `replace_files`
+    /// (a migration), or when an earlier migration left them for a server that
+    /// was still running from them: that server starts its workers by the
+    /// `superfluid-workerd` path it was started with, so while one runs, only
+    /// the `superfluid` command moves and a `migrating` note is kept; the next
+    /// link finishes the move once nothing runs from there.
     pub fn link(&self, prefix: &Path, replace_files: bool) -> Result<Vec<String>, String> {
         std::fs::create_dir_all(prefix).map_err(|e| format!("{}: {e}", prefix.display()))?;
         std::fs::write(self.dir.join("prefix"), format!("{}\n", prefix.display())).map_err(|e| format!("{}: {e}", self.dir.display()))?;
         let mut notes = Vec::new();
+        let pending = self.dir.join("migrating");
+        let legacy = self.legacy_files(prefix);
+        let migrating = !legacy.is_empty() && (replace_files || pending.exists());
+        let in_use = migrating && running_from(prefix);
+        let replace: Vec<&str> = match (migrating, in_use) {
+            (true, true) => vec!["superfluid"],
+            (true, false) => LINKED.to_vec(),
+            (false, _) => Vec::new(),
+        };
         let ours = |link: &Path| std::fs::read_link(link).map(|t| t.starts_with(&self.dir)).unwrap_or(false);
         let relink = |link: &Path, target: &Path| -> Result<(), String> {
             let tmp = link.with_file_name(format!(".{}.tmp", link.file_name().and_then(|n| n.to_str()).unwrap_or("link")));
@@ -167,13 +185,38 @@ impl Versions {
             let target = self.dir.join("current").join("bin").join(name);
             match link.symlink_metadata() {
                 Ok(m) if m.file_type().is_symlink() && ours(&link) => continue,
-                Ok(m) if m.file_type().is_symlink() || replace_files => relink(&link, &target)?,
+                Ok(m) if m.file_type().is_symlink() || replace.contains(name) => relink(&link, &target)?,
+                Ok(_) if migrating => continue,
                 Ok(_) => {
                     notes.push(format!("{} is not a link into {}; left as it is", link.display(), self.dir.display()));
                     continue;
                 }
                 Err(_) => relink(&link, &target)?,
             }
+        }
+        if migrating {
+            let libexec = prefix.join("..").join("libexec").join("superfluid");
+            if in_use {
+                std::fs::write(&pending, format!("{}\n", prefix.display())).map_err(|e| format!("{}: {e}", pending.display()))?;
+                notes.push(format!(
+                    "a server still runs from the copy the install script placed in {}: its superfluid-workerd, superfluid-noded and workers stay until it stops; the next update, switch or install finishes the move",
+                    prefix.display()
+                ));
+            } else {
+                if let Ok(rd) = std::fs::read_dir(&libexec) {
+                    for e in rd.flatten() {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        if name.starts_with("superfluid-worker-") || name.starts_with("libsuperfluid_tokenizer_") {
+                            let _ = std::fs::remove_file(e.path());
+                        }
+                    }
+                    let _ = std::fs::remove_dir(&libexec);
+                }
+                let _ = std::fs::remove_file(&pending);
+                notes.push(format!("the install script's copy in {} now links into {}; its workers were removed", prefix.display(), self.dir.display()));
+            }
+        } else if pending.exists() && legacy.is_empty() {
+            let _ = std::fs::remove_file(&pending);
         }
         let here = self.on_disk();
         for v in &here {
@@ -599,34 +642,41 @@ fn keep_in_place(versions: &Versions, prefix: &Path) -> Result<String, String> {
     Ok(old)
 }
 
-/// Replace the install script's in-place copies with links into the
-/// layout, and remove the workers they came with once nothing runs from
-/// that copy any more.
+/// Replace the install script's in-place copies with links into the layout
+/// (see `Versions::link` for a server still running from them).
 fn migrate(versions: &Versions, prefix: &Path, report: &mut Report) -> Result<(), String> {
     for note in versions.link(&prefix.join("bin"), true)? {
         report.say(note);
     }
-    let libexec = prefix.join("libexec").join("superfluid");
-    let in_use = running_from(&prefix.join("bin"));
-    if !in_use {
-        if let Ok(rd) = std::fs::read_dir(&libexec) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with("superfluid-worker-") || name.starts_with("libsuperfluid_tokenizer_") {
-                    let _ = std::fs::remove_file(e.path());
+    report.say(format!("the copy the install script placed in {}/bin is kept under {} as the version to go back to", prefix.display(), versions.dir.display()));
+    Ok(())
+}
+
+/// `from` takes the place of `dest`, which is set aside until `from` is in
+/// place. A move that fails leaves nothing of it at `dest` and brings the
+/// copy set aside back; if that fails too, both failures are reported and
+/// the copy is still under `aside`.
+fn replace_tree(from: &Path, dest: &Path, aside: &Path, mover: impl Fn(&Path, &Path) -> Result<(), String>) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(aside);
+    let had = dest.exists();
+    if had {
+        std::fs::rename(dest, aside).map_err(|e| format!("{}: {e}", dest.display()))?;
+    }
+    match mover(from, dest) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(aside);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(dest);
+            if had {
+                if let Err(back) = std::fs::rename(aside, dest) {
+                    return Err(format!("{e}; and {} could not be put back from {}: {back}", dest.display(), aside.display()));
                 }
             }
-            let _ = std::fs::remove_dir(&libexec);
+            Err(e)
         }
     }
-    report.say(format!(
-        "{}/bin/superfluid now links into {}; the copy the install script placed there is kept under versions/ and its workers in {} {}",
-        prefix.display(),
-        versions.dir.display(),
-        libexec.display(),
-        if in_use { "stay while a server still runs from that copy" } else { "were removed" }
-    ));
-    Ok(())
 }
 
 /// `self update`: the newest release that fits, or the one named.
@@ -775,20 +825,22 @@ pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<
         // Proved where it is; only then does it take the place of a copy that does not work,
         // which is set aside until the new one is in place.
         probe_binary(&from.join("bin").join("superfluid"), &v, home, &engine).map_err(|e| format!("{v} was not made current: {e}"))?;
-        let aside = versions.dir.join(format!(".replaced-{v}"));
-        let _ = std::fs::remove_dir_all(&aside);
-        if dest.exists() {
-            std::fs::rename(&dest, &aside).map_err(|e| format!("{}: {e}", dest.display()))?;
-        }
-        if let Err(e) = move_tree(from, &dest) {
-            if aside.exists() {
-                let _ = std::fs::rename(&aside, &dest);
-            }
-            return Err(e);
-        }
-        let _ = std::fs::remove_dir_all(&aside);
+        replace_tree(from, &dest, &versions.dir.join(format!(".replaced-{v}")), move_tree)?;
     }
+    // The install script's earlier copy under the prefix, if that is what is there, is kept
+    // as the version to go back to, as an update keeps it.
+    let kept = match prefix.and_then(|p| match installed_as(&p.join("superfluid")) {
+        Installed::InPlace { prefix: root } => Some(root),
+        _ => None,
+    }) {
+        Some(root) => Some(keep_in_place(&versions, &root)?),
+        None => None,
+    };
     versions.set_current(&v)?;
+    if let Some(old) = kept.filter(|old| *old != v) {
+        std::fs::write(versions.dir.join("previous"), format!("{old}\n")).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
+        report.say(format!("the copy that was in the prefix is kept as {old}: `superfluid self use {old}` goes back to it"));
+    }
     report.changed = true;
     report.say(format!("superfluid {v} is current ({})", versions.dir.join("current").display()));
     if let Some(prefix) = prefix.map(Path::to_path_buf).or_else(|| versions.prefix()) {
@@ -1029,6 +1081,7 @@ pub fn run(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
     use superfluid_adapter_kit::install::sha256_of;
 
     fn scratch(tag: &str) -> PathBuf {
@@ -1229,6 +1282,119 @@ mod tests {
         let r = install_from(&home, &catalog, &good, None).unwrap();
         assert!(r.changed && !versions.version_dir("0.1.3").join("mine").exists() && version_of(&versions.binary("0.1.3")).is_ok(), "{:?}", r.lines);
         assert!(!versions.dir.join(".replaced-0.1.3").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const SLEEP_ENV: &str = "SUPERFLUID_SELF_TEST_SLEEP";
+
+    /// The sleeper the running-server test spawns: this binary, copied under a prefix
+    /// and started with this test selected; it sleeps only when told to.
+    #[test]
+    fn sleeps_when_asked_to() {
+        if std::env::var_os(SLEEP_ENV).is_some() {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    #[test]
+    fn a_replacement_that_fails_leaves_the_copy_set_aside_back_in_place() {
+        let dir = scratch("replace");
+        let (from, dest, aside) = (dir.join("from"), dir.join("dest"), dir.join(".replaced"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("mine"), "").unwrap();
+        // A move that leaves half a tree behind and fails.
+        let half = |from: &Path, dest: &Path| -> Result<(), String> {
+            std::fs::create_dir_all(dest).unwrap();
+            std::fs::write(dest.join("partial"), "").unwrap();
+            Err(format!("{} -> {}: no space", from.display(), dest.display()))
+        };
+        let e = replace_tree(&from, &dest, &aside, half).unwrap_err();
+        assert!(e.contains("no space") && !e.contains("could not be put back"), "{e}");
+        assert!(dest.join("mine").exists() && !dest.join("partial").exists(), "the copy set aside is back, whole");
+        assert!(!aside.exists());
+        // A move that works: the copy set aside is gone.
+        let whole = |from: &Path, dest: &Path| -> Result<(), String> { copy_tree(from, dest) };
+        std::fs::write(from.join("new"), "").unwrap();
+        replace_tree(&from, &dest, &aside, whole).unwrap();
+        assert!(dest.join("new").exists() && !dest.join("mine").exists() && !aside.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_still_running_from_the_install_scripts_copy_keeps_its_workerd_until_it_stops() {
+        let dir = scratch("legacy-running");
+        let (home, prefix) = (dir.join("home"), dir.join("local"));
+        let p = listing(&dir, &[("0.1.3", "2026-10-01", None)]);
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        release_tree(&prefix, "0.1.2");
+        // The legacy server: a real executable running from the prefix, as a 0.1.2 workerd
+        // would. A copy of this test binary, told to sleep (a copied system binary is killed
+        // on macOS, which refuses platform binaries outside their place).
+        let bin = prefix.join("bin");
+        std::fs::copy(std::env::current_exe().unwrap(), bin.join("superfluid-workerd")).unwrap();
+        let mut sleeper = Command::new(bin.join("superfluid-workerd"))
+            .args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
+            .env(SLEEP_ENV, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut seen = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(100));
+            if running_from(&bin) {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            eprintln!("SKIP: this platform does not report the sleeper's executable");
+            let _ = sleeper.kill();
+            return;
+        }
+        let exe = bin.join("superfluid");
+        let opts = Options { source: Some(p.to_string_lossy().to_string()), ..Options::default() };
+        let r = update(&home, &catalog, &exe, &opts).unwrap();
+        let versions = Versions::of(&home);
+        assert_eq!(versions.current().as_deref(), Some("0.1.3"), "{:?}", r.lines);
+        assert!(std::fs::symlink_metadata(&exe).unwrap().file_type().is_symlink(), "the command moved");
+        assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_file(), "the running server's workerd stayed a file: {:?}", r.lines);
+        assert!(bin.join("superfluid-noded").symlink_metadata().unwrap().file_type().is_file());
+        assert!(prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists(), "and its workers");
+        assert!(versions.dir.join("migrating").exists());
+        assert!(r.lines.iter().any(|l| l.contains("still runs from the copy")), "{:?}", r.lines);
+        assert_eq!(versions.previous().as_deref(), Some("0.1.2"));
+        // Still running: a later link changes nothing of that.
+        versions.link(&bin, false).unwrap();
+        assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_file());
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        // Stopped: the next link finishes the move.
+        let notes = versions.link(&bin, false).unwrap();
+        assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_symlink(), "{notes:?}");
+        assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists());
+        assert!(!versions.dir.join("migrating").exists());
+        assert!(notes.iter().any(|n| n.contains("now links into")), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_install_script_over_an_earlier_copy_keeps_that_copy_to_go_back_to() {
+        let dir = scratch("script-over-legacy");
+        let (home, prefix) = (dir.join("home"), dir.join("local"));
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        release_tree(&prefix, "0.1.2");
+        let tree = release_tree(&dir.join("unpacked").join("superfluid-x"), "0.1.3");
+        let r = install_from(&home, &catalog, &tree, Some(&prefix.join("bin"))).unwrap();
+        let versions = Versions::of(&home);
+        assert_eq!((versions.current().as_deref(), versions.previous().as_deref()), (Some("0.1.3"), Some("0.1.2")), "{:?}", r.lines);
+        assert_eq!(version_of(&versions.binary("0.1.2")).unwrap(), "0.1.2");
+        for name in LINKED {
+            assert!(prefix.join("bin").join(name).symlink_metadata().unwrap().file_type().is_symlink(), "{name}");
+        }
+        assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists());
+        assert!(r.lines.iter().any(|l| l.contains("kept as 0.1.2")), "{:?}", r.lines);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
