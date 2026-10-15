@@ -1333,13 +1333,23 @@ mod tests {
         // on macOS, which refuses platform binaries outside their place).
         let bin = prefix.join("bin");
         std::fs::copy(std::env::current_exe().unwrap(), bin.join("superfluid-workerd")).unwrap();
-        let mut sleeper = Command::new(bin.join("superfluid-workerd"))
-            .args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
-            .env(SLEEP_ENV, "1")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        // Killed and waited for on every way out of this test.
+        struct Sleeper(std::process::Child);
+        impl Drop for Sleeper {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut sleeper = Sleeper(
+            Command::new(bin.join("superfluid-workerd"))
+                .args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
+                .env(SLEEP_ENV, "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         let mut seen = false;
         for _ in 0..50 {
             std::thread::sleep(Duration::from_millis(100));
@@ -1350,7 +1360,6 @@ mod tests {
         }
         if !seen {
             eprintln!("SKIP: this platform does not report the sleeper's executable");
-            let _ = sleeper.kill();
             return;
         }
         let exe = bin.join("superfluid");
@@ -1368,8 +1377,7 @@ mod tests {
         // Still running: a later link changes nothing of that.
         versions.link(&bin, false).unwrap();
         assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_file());
-        let _ = sleeper.kill();
-        let _ = sleeper.wait();
+        drop(std::mem::replace(&mut sleeper, Sleeper(Command::new("true").spawn().unwrap())));
         // Stopped: the next link finishes the move.
         let notes = versions.link(&bin, false).unwrap();
         assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_symlink(), "{notes:?}");
