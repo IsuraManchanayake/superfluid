@@ -85,7 +85,11 @@ jobs:
         if: runner.environment == 'github-hosted'
       - if: runner.environment == 'self-hosted'
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # Never on a self-hosted runner: its save step deletes every file in
+      # ~/.cargo/bin that cargo did not install during the job, rustup
+      # included. A self-hosted runner keeps its target directory anyway.
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
 
       - name: Build the worker and plan the untested install
         id: plan
