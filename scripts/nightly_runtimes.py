@@ -5,15 +5,19 @@ and how to record one that passed.
     nightly_runtimes.py llamacpp pick [--requested bNNNN]
     nightly_runtimes.py llamacpp append bNNNN
     nightly_runtimes.py mlx pick [--requested X.Y.Z]
+    nightly_runtimes.py mlx append X.Y.Z --report <pip report.json>
 
 `pick` prints `version=<v>` for the newest upstream release the adapter's
 recipe does not list yet, or `version=` when there is nothing new (or when
 `--requested` names a release already listed); the workflow reads it from
-$GITHUB_OUTPUT. `append` adds a llama.cpp build to the adapter's recipe as a
-tested build, newest first: the same asset names the previous tested build
-carries, with the size and SHA-256 GitHub lists for each, so a human reviews
-a PR rather than typing digests. An MLX version is pinned by hand, wheel by
-wheel, so `mlx` has no `append`; the job opens an issue with the result.
+$GITHUB_OUTPUT. `append` adds a release to the adapter's recipe as a tested
+one, newest first, so a human reviews a PR rather than typing digests. For
+llama.cpp that is the same asset names the previous tested build carries,
+with the size and SHA-256 GitHub lists for each. For MLX it is the whole
+environment pip resolved for the version on the runner, read from pip's
+install report (`pip install --dry-run --report`): every distribution's
+wheel, with the size and SHA-256 PyPI lists for it, which must agree with
+the digest pip reported.
 
 Only the standard library; GITHUB_TOKEN is used when set, for the API rate
 limit.
@@ -25,6 +29,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +41,7 @@ RECIPES = {
 LLAMACPP_RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30"
 LLAMACPP_RELEASE = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}"
 MLX_PYPI = "https://pypi.org/pypi/mlx/json"
+PYPI_RELEASE = "https://pypi.org/pypi/{name}/{version}/json"
 BUILD = re.compile(r"^b(\d+)$")
 
 
@@ -44,8 +50,11 @@ def fetch_json(url: str) -> object:
     token = os.environ.get("GITHUB_TOKEN")
     if token and "api.github.com" in url:
         req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"{url}: HTTP {e.code}") from None
 
 
 def recipe(runtime: str) -> dict:
@@ -124,21 +133,73 @@ def append_llamacpp(version: str) -> None:
     print(f"recorded {version} ({release['published_at'][:10]}) with {len(assets)} assets in {path.relative_to(ROOT)}")
 
 
+def canonical(name: str) -> str:
+    """A project name as PyPI's URLs spell it; the recipe keeps the spelling
+    the distribution gives itself (`PyYAML`, `Jinja2`) and orders by this."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pypi_wheel(name: str, version: str, file: str) -> dict:
+    """The size and SHA-256 PyPI lists for one wheel of a release."""
+    listing = fetch_json(PYPI_RELEASE.format(name=name, version=version))
+    for u in listing.get("urls", []):
+        if u["filename"] == file:
+            return {"size": u["size"], "sha256": u["digests"]["sha256"]}
+    raise SystemExit(f"PyPI lists no {file} for {name} {version}")
+
+
+def append_mlx(version: str, report_path: Path) -> None:
+    path = RECIPES["mlx"]
+    r = recipe("mlx")
+    tested = r.setdefault("tested", [])
+    if any(t["version"] == version for t in tested):
+        print(f"{version} is already a tested version", file=sys.stderr)
+        return
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    wheels, mlx_lm = [], None
+    for item in report.get("install", []):
+        meta = item["metadata"]
+        name, ver = meta["name"], meta["version"]
+        url = item["download_info"]["url"]
+        file = url.rsplit("/", 1)[-1]
+        if not file.endswith(".whl"):
+            raise SystemExit(f"{name} {ver} resolved to {file}, not a wheel; the recipe pins wheels only")
+        if canonical(name) == "mlx" and ver != version:
+            raise SystemExit(f"the report resolved mlx {ver}, not {version}")
+        if canonical(name) == "mlx-lm":
+            mlx_lm = ver
+        pinned = pypi_wheel(canonical(name), ver, file)
+        reported = item["download_info"].get("archive_info", {}).get("hashes", {}).get("sha256")
+        if reported and reported != pinned["sha256"]:
+            raise SystemExit(f"{file}: the SHA-256 pip reported differs from the one PyPI lists")
+        wheels.append({"name": name, "version": ver, "file": file, "size": pinned["size"], "sha256": pinned["sha256"]})
+    if not any(canonical(w["name"]) == "mlx" for w in wheels) or mlx_lm is None:
+        raise SystemExit("the report holds no mlx or no mlx-lm wheel")
+    wheels.sort(key=lambda w: canonical(w["name"]))
+    tested.insert(0, {"version": version, "mlx_lm": mlx_lm, "wheels": wheels})
+    path.write_text(json.dumps(r, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"recorded mlx {version} (mlx-lm {mlx_lm}) with {len(wheels)} wheels in {path.relative_to(ROOT)}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("runtime", choices=["llamacpp", "mlx"])
     sub = ap.add_subparsers(dest="action", required=True)
     p = sub.add_parser("pick", help="the newest upstream release the recipe does not list, as version=<v>")
     p.add_argument("--requested", default="", help="test this release instead of the newest")
-    a = sub.add_parser("append", help="record a llama.cpp build that passed as a tested build")
+    a = sub.add_parser("append", help="record a release that passed as a tested one")
     a.add_argument("version")
+    a.add_argument("--report", help="mlx: pip's install report (--dry-run --report) for the version on the runner")
     args = ap.parse_args()
     if args.action == "pick":
         print(f"version={pick(args.runtime, args.requested.strip() or None)}")
         return 0
-    if args.runtime != "llamacpp":
-        raise SystemExit("an MLX version is pinned by hand, wheel by wheel; see the recipe's `about`")
-    append_llamacpp(args.version)
+    if args.runtime == "llamacpp":
+        append_llamacpp(args.version)
+        return 0
+    if not args.report:
+        raise SystemExit("mlx append needs --report, pip's install report for the version")
+    append_mlx(args.version, Path(args.report))
     return 0
 
 
