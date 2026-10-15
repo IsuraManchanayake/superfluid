@@ -490,12 +490,17 @@ fn version_of(binary: &Path) -> Result<String, String> {
 /// Proof that a version starts here and, when an engine is in use, drives
 /// it: its `--version` and its `runtimes --json`, the probe a host runs.
 fn probe(versions: &Versions, v: &str, home: &Path, engine: &Engine) -> Result<(), String> {
-    let binary = versions.binary(v);
-    let said = version_of(&binary)?;
+    probe_binary(&versions.binary(v), v, home, engine)
+}
+
+/// The same proof of a copy wherever it is, so a replacement is proved
+/// before anything it replaces is touched.
+fn probe_binary(binary: &Path, v: &str, home: &Path, engine: &Engine) -> Result<(), String> {
+    let said = version_of(binary)?;
     if said != v {
         return Err(format!("{} says it is {said}, not {v}", binary.display()));
     }
-    let out = Command::new(&binary)
+    let out = Command::new(binary)
         .args(["runtimes", "--json"])
         .env("SUPERFLUID_HOME", home)
         .env(NO_CHECK_ENV, "1")
@@ -570,27 +575,56 @@ fn place(versions: &Versions, release: &Release, report: &mut Report) -> Result<
     Ok(())
 }
 
+/// The install script's in-place copy, kept under the layout as the version
+/// it is, so the update that replaces it leaves a version to go back to.
+fn keep_in_place(versions: &Versions, prefix: &Path) -> Result<String, String> {
+    let bin = prefix.join("bin");
+    let old = version_of(&bin.join("superfluid"))?;
+    if versions.binary(&old).is_file() {
+        return Ok(old);
+    }
+    let dest = versions.version_dir(&old);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(dest.join("bin")).map_err(|e| format!("{}: {e}", dest.display()))?;
+    for name in LINKED {
+        let src = bin.join(name);
+        if src.is_file() {
+            std::fs::copy(&src, dest.join("bin").join(name)).map_err(|e| format!("{}: {e}", src.display()))?;
+        }
+    }
+    let libexec = prefix.join("libexec").join("superfluid");
+    if libexec.is_dir() {
+        copy_tree(&libexec, &dest.join("libexec").join("superfluid"))?;
+    }
+    Ok(old)
+}
+
 /// Replace the install script's in-place copies with links into the
-/// layout, and remove the workers they came with.
+/// layout, and remove the workers they came with once nothing runs from
+/// that copy any more.
 fn migrate(versions: &Versions, prefix: &Path, report: &mut Report) -> Result<(), String> {
     for note in versions.link(&prefix.join("bin"), true)? {
         report.say(note);
     }
     let libexec = prefix.join("libexec").join("superfluid");
-    if let Ok(rd) = std::fs::read_dir(&libexec) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with("superfluid-worker-") || name.starts_with("libsuperfluid_tokenizer_") {
-                let _ = std::fs::remove_file(e.path());
+    let in_use = running_from(&prefix.join("bin"));
+    if !in_use {
+        if let Ok(rd) = std::fs::read_dir(&libexec) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("superfluid-worker-") || name.starts_with("libsuperfluid_tokenizer_") {
+                    let _ = std::fs::remove_file(e.path());
+                }
             }
+            let _ = std::fs::remove_dir(&libexec);
         }
-        let _ = std::fs::remove_dir(&libexec);
     }
     report.say(format!(
-        "{}/bin/superfluid now links into {}; the copy the install script placed there was replaced, and its workers in {} removed",
+        "{}/bin/superfluid now links into {}; the copy the install script placed there is kept under versions/ and its workers in {} {}",
         prefix.display(),
         versions.dir.display(),
-        libexec.display()
+        libexec.display(),
+        if in_use { "stay while a server still runs from that copy" } else { "were removed" }
     ));
     Ok(())
 }
@@ -605,6 +639,15 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
         Installed::Other(p) => return Err(not_ours(p)),
     };
     let target = target().ok_or_else(|| format!("no release is published for {} {}", std::env::consts::OS, std::env::consts::ARCH))?;
+    // Taken before anything below is read or decided: an update queued behind
+    // another sees the layout that one left, not the one it found.
+    let _one_at_a_time = match opts.dry_run {
+        true => None,
+        false => {
+            std::fs::create_dir_all(&versions.dir).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
+            Some(crate::pulls::Lock::take(&versions.dir, "self", "update of superfluid")?)
+        }
+    };
     let engine = engine_here(catalog);
     let compat = compat_fetcher(15);
     let found = fetch_releases(opts.source.as_deref().unwrap_or(&listing_source()), target, 30)?;
@@ -648,7 +691,12 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
         report.say("dry run: nothing fetched or changed");
         return Ok(report);
     }
-    let _one_at_a_time = crate::pulls::Lock::take(&versions.dir, "self", "update of superfluid")?;
+    // The in-place copy goes under the layout first, as the version to go back to.
+    let kept = match &migrating {
+        Some(prefix) => Some(keep_in_place(&versions, prefix)?),
+        None => None,
+    };
+    let on_disk = on_disk || versions.binary(&v).is_file();
     if !on_disk {
         place(&versions, chosen, &mut report)?;
     }
@@ -659,6 +707,9 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
         return Err(format!("{v} was not made current: {e}"));
     }
     versions.set_current(&v)?;
+    if let Some(old) = kept.filter(|old| *old != v) {
+        std::fs::write(versions.dir.join("previous"), format!("{old}\n")).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
+    }
     report.changed = true;
     report.say(format!("superfluid {v} is current ({})", versions.dir.join("current").display()));
     if let Some(prefix) = &migrating {
@@ -687,6 +738,8 @@ pub fn use_version(home: &Path, catalog: &Catalog, exe: &Path, v: &str) -> Resul
     };
     let v = v.trim_start_matches('v');
     let mut report = Report::default();
+    std::fs::create_dir_all(&versions.dir).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
+    let _one_at_a_time = crate::pulls::Lock::take(&versions.dir, "self", "switch of superfluid")?;
     if versions.current().as_deref() == Some(v) {
         report.say(format!("superfluid {v} is current already"));
         return Ok(report);
@@ -708,16 +761,33 @@ pub fn use_version(home: &Path, catalog: &Catalog, exe: &Path, v: &str) -> Resul
 pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<&Path>) -> Result<Report, String> {
     let versions = Versions::of(home);
     let mut report = Report::default();
-    let v = version_of(&from.join("bin").join("superfluid"))?;
     std::fs::create_dir_all(&versions.dir).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
     let _one_at_a_time = crate::pulls::Lock::take(&versions.dir, "self", "install of superfluid")?;
-    let dest = versions.version_dir(&v);
-    if dest != from {
-        let _ = std::fs::remove_dir_all(&dest);
-        move_tree(from, &dest)?;
-    }
+    let v = version_of(&from.join("bin").join("superfluid"))?;
     let engine = engine_here(catalog);
-    probe(&versions, &v, home, &engine).map_err(|e| format!("{v} was not made current: {e}"))?;
+    let dest = versions.version_dir(&v);
+    if dest == from {
+        probe(&versions, &v, home, &engine).map_err(|e| format!("{v} was not made current: {e}"))?;
+    } else if versions.binary(&v).is_file() && probe(&versions, &v, home, &engine).is_ok() {
+        // An installed version is kept as it is; a copy of it that works is not replaced.
+        report.say(format!("superfluid {v} is installed here already and works; the copy given was not used"));
+    } else {
+        // Proved where it is; only then does it take the place of a copy that does not work,
+        // which is set aside until the new one is in place.
+        probe_binary(&from.join("bin").join("superfluid"), &v, home, &engine).map_err(|e| format!("{v} was not made current: {e}"))?;
+        let aside = versions.dir.join(format!(".replaced-{v}"));
+        let _ = std::fs::remove_dir_all(&aside);
+        if dest.exists() {
+            std::fs::rename(&dest, &aside).map_err(|e| format!("{}: {e}", dest.display()))?;
+        }
+        if let Err(e) = move_tree(from, &dest) {
+            if aside.exists() {
+                let _ = std::fs::rename(&aside, &dest);
+            }
+            return Err(e);
+        }
+        let _ = std::fs::remove_dir_all(&aside);
+    }
     versions.set_current(&v)?;
     report.changed = true;
     report.say(format!("superfluid {v} is current ({})", versions.dir.join("current").display()));
@@ -862,19 +932,25 @@ pub fn check_in_background(home: PathBuf, offline: bool) {
     }
     std::thread::Builder::new()
         .name("update-check".into())
-        .spawn(move || {
-            let line = match Check::read(&home).filter(|c| !c.due()) {
-                Some(cached) => announce(&home, cached),
-                None => match check_now(&home, &Catalog::from_env(), Some(HOLD_OFF_DAYS), &listing_source()) {
-                    Ok(fresh) => announce(&home, fresh),
-                    Err(_) => None,
-                },
-            };
-            if let Some(line) = line {
+        .spawn(move || loop {
+            if let Some(line) = tick(&home, &Catalog::from_env(), &listing_source()) {
                 eprintln!("superfluid: {line}");
             }
+            // Once an hour the cache is looked at again, so a server that stays up
+            // learns of a release published later, or one past its hold-off, and a
+            // check another process made is not repeated.
+            std::thread::sleep(Duration::from_secs(60 * 60));
         })
         .ok();
+}
+
+/// One round of the check: the cache when it is not yet due, else the listing;
+/// the line to print when a release not yet announced is newer than this one.
+pub fn tick(home: &Path, catalog: &Catalog, source: &str) -> Option<String> {
+    match Check::read(home).filter(|c| !c.due()) {
+        Some(cached) => announce(home, cached),
+        None => announce(home, check_now(home, catalog, Some(HOLD_OFF_DAYS), source).ok()?),
+    }
 }
 
 // ----- the command --------------------------------------------------------
@@ -1120,6 +1196,88 @@ mod tests {
     }
 
     #[test]
+    fn an_installed_version_is_kept_and_only_a_proved_copy_replaces_a_broken_one() {
+        let dir = scratch("reinstall");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let versions = Versions::of(&home);
+        let r = install_from(&home, &catalog, &release_tree(&dir.join("first").join("superfluid-x"), "0.1.3"), None).unwrap();
+        assert!(r.changed);
+        std::fs::write(versions.version_dir("0.1.3").join("mine"), "").unwrap();
+        // The same version again: what is here works, so it stays, marker and all.
+        let r = install_from(&home, &catalog, &release_tree(&dir.join("second").join("superfluid-x"), "0.1.3"), None).unwrap();
+        assert!(r.lines.iter().any(|l| l.contains("installed here already and works")), "{:?}", r.lines);
+        assert!(versions.version_dir("0.1.3").join("mine").exists() && versions.current().as_deref() == Some("0.1.3"));
+        // A copy that does not start never replaces a working one, which stays current.
+        let bad = release_tree(&dir.join("bad").join("superfluid-x"), "0.1.3");
+        std::fs::write(bad.join("bin").join("superfluid"), "#!/bin/sh\nexit 1\n").unwrap();
+        let e = install_from(&home, &catalog, &bad, None).unwrap_err();
+        assert!(e.contains("did not say its version"), "refused before anything is touched: {e}");
+        assert!(versions.version_dir("0.1.3").join("mine").exists() && versions.current().as_deref() == Some("0.1.3"));
+        // A copy that says its version but does not start is not used either, since what is here works.
+        let wrong = release_tree(&dir.join("wrong").join("superfluid-x"), "0.1.3");
+        std::fs::write(wrong.join("bin").join("superfluid"), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'superfluid 0.1.3' && exit 0\nexit 1\n").unwrap();
+        let r = install_from(&home, &catalog, &wrong, None).unwrap();
+        assert!(r.lines.iter().any(|l| l.contains("the copy given was not used")), "{:?}", r.lines);
+        assert!(versions.version_dir("0.1.3").join("mine").exists() && versions.current().as_deref() == Some("0.1.3"));
+        // A broken copy here is replaced, by a copy proved first; the broken one is gone only then.
+        std::fs::write(versions.binary("0.1.3"), "#!/bin/sh\nexit 1\n").unwrap();
+        let e = install_from(&home, &catalog, &wrong, None).unwrap_err();
+        assert!(e.contains("was not made current") && e.contains("runtimes --json failed"), "{e}");
+        assert!(versions.version_dir("0.1.3").join("mine").exists(), "a copy that fails the probe replaces nothing");
+        let good = release_tree(&dir.join("good").join("superfluid-x"), "0.1.3");
+        let r = install_from(&home, &catalog, &good, None).unwrap();
+        assert!(r.changed && !versions.version_dir("0.1.3").join("mine").exists() && version_of(&versions.binary("0.1.3")).is_ok(), "{:?}", r.lines);
+        assert!(!versions.dir.join(".replaced-0.1.3").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_switch_waits_for_an_update_that_holds_the_lock() {
+        let dir = scratch("lock");
+        let home = dir.join("home");
+        let versions = Versions::of(&home);
+        release_tree(&versions.version_dir("0.1.3"), "0.1.3");
+        release_tree(&versions.version_dir("0.1.4"), "0.1.4");
+        versions.set_current("0.1.4").unwrap();
+        let held = crate::pulls::Lock::take(&versions.dir, "self", "update of superfluid").unwrap();
+        let exe = versions.binary("0.1.4");
+        let (home2, exe2) = (home.clone(), exe.clone());
+        let switching = std::thread::spawn(move || {
+            let catalog = Catalog::new(home2.clone(), None, home2.join("superfluid-workerd"));
+            use_version(&home2, &catalog, &exe2, "0.1.3").map(|r| r.changed)
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!switching.is_finished(), "the switch does not run while the lock is held");
+        assert_eq!(versions.current().as_deref(), Some("0.1.4"));
+        drop(held);
+        assert_eq!(switching.join().unwrap(), Ok(true));
+        assert_eq!(versions.current().as_deref(), Some("0.1.3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_check_goes_on_from_the_cache_and_asks_again_when_due() {
+        let dir = scratch("tick");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None)]);
+        let source = p.to_string_lossy().to_string();
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let first = tick(&home, &catalog, &source).unwrap();
+        assert!(first.starts_with("superfluid 99.0.0 is available"), "{first}");
+        assert_eq!(tick(&home, &catalog, "/nonexistent/releases.json"), None, "not due: the cache answers, nothing is read, and the release was announced already");
+        let stale = Check { checked_at: 1, ..Check::read(&home).unwrap() };
+        stale.write(&home).unwrap();
+        assert_eq!(tick(&home, &catalog, "/nonexistent/releases.json"), None, "due, but the listing is unreachable: nothing, no panic");
+        assert_eq!(Check::read(&home).unwrap().checked_at, 1, "an unreachable listing leaves the cache as it was");
+        let p = listing(&dir.join("later"), &[("99.0.0", "2026-01-01", None), ("99.5.0", "2026-01-02", None)]);
+        let later = tick(&home, &catalog, &p.to_string_lossy()).unwrap();
+        assert!(later.starts_with("superfluid 99.5.0 is available"), "a release published since is announced on the next due check: {later}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_release_that_does_not_start_or_drive_the_engine_is_not_made_current() {
         let dir = scratch("probe");
         let home = dir.join("home");
@@ -1155,6 +1313,11 @@ mod tests {
         assert!(std::fs::symlink_metadata(&exe).unwrap().file_type().is_symlink(), "the copy became a link");
         assert_eq!(std::fs::read_link(prefix.join("bin").join("superfluid-noded")).unwrap(), versions.dir.join("current").join("bin").join("superfluid-noded"));
         assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists(), "the old workers are gone");
+        // The copy that was there is kept under the layout, as the version to go back to.
+        assert_eq!(versions.previous().as_deref(), Some("0.1.2"), "{:?}", r.lines);
+        assert_eq!(version_of(&versions.binary("0.1.2")).unwrap(), "0.1.2");
+        assert!(versions.version_dir("0.1.2").join("libexec").join("superfluid").join("superfluid-worker-toy").exists(), "with its workers");
+        assert_eq!(versions.on_disk(), ["0.1.3", "0.1.2"]);
         assert_eq!(versions.prefix().as_deref(), Some(std::fs::canonicalize(prefix.join("bin")).unwrap().as_path()));
         assert!(r.lines.iter().any(|l| l.contains("now links into")), "{:?}", r.lines);
         let _ = std::fs::remove_dir_all(&dir);

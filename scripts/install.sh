@@ -63,13 +63,20 @@ have="$(sha256 "$tmp/$name.tar.gz")"
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 chmod +x "$tmp/$name"/bin/superfluid* "$tmp/$name"/libexec/superfluid/superfluid-worker-*
 # The release places itself: under $SUPERFLUID_HOME/versions, with links in the
-# prefix. A release from before `self install` existed is copied in place.
+# prefix. A release from before `self install` existed is placed by the
+# superfluid already installed when there is one that can, and copied in place
+# otherwise; never written through a link into the versions directory.
 if "$tmp/$name/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin"; then
   :
+elif [ -L "$PREFIX/bin/superfluid" ] && "$PREFIX/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin"; then
+  say "placed by the installed superfluid, since this release cannot place itself"
 else
   say "this release places itself the old way: copied into ${PREFIX/#$HOME/~}/bin"
   mkdir -p "$PREFIX/bin" "$PREFIX/libexec/superfluid"
-  cp "$tmp/$name"/bin/* "$PREFIX/bin/"
+  for f in "$tmp/$name"/bin/*; do
+    [ -L "$PREFIX/bin/$(basename "$f")" ] && rm -f "$PREFIX/bin/$(basename "$f")"
+    cp "$f" "$PREFIX/bin/"
+  done
   cp "$tmp/$name"/libexec/superfluid/* "$PREFIX/libexec/superfluid/"
   chmod +x "$PREFIX"/bin/superfluid* "$PREFIX"/libexec/superfluid/superfluid-worker-*
 fi
