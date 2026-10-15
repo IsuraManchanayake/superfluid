@@ -131,6 +131,32 @@ pub fn device_free_bytes() -> u64 {
     offload_memory().map_or(0, |m| m.free)
 }
 
+/// Cells of state the cache may keep beyond the pool as llama.cpp's own export,
+/// with the bound worded for the log. Exports live in host memory: as many cells
+/// as the pool has, within EXPORT_BYTES. With the model on an accelerator
+/// (`device`: its free bytes now, and its total) that memory is the one the pool
+/// was sized in, so the exports also keep to the pool's share of what is free
+/// past its headroom. With the model on the CPU, by choice or because the host
+/// has no accelerator, the host bound is the whole rule: a device the host does
+/// not have reports no free memory, which is no reason to keep nothing.
+fn export_budget(n_ctx: u64, kv_bytes_per_token: u64, device: Option<(u64, u64)>) -> (u64, String) {
+    let affordable = EXPORT_BYTES / kv_bytes_per_token.max(1);
+    let Some((free_now, total)) = device else {
+        return (n_ctx.min(affordable), "at most 8 GiB".to_string());
+    };
+    let headroom = superfluid_executor::sizing::headroom_bytes((superfluid_executor::sizing::PLANNING_SHARE * total as f64) as u64);
+    let free = free_now.saturating_sub(headroom);
+    // budgeted_cells reads 0 free bytes as unknown and grants all.
+    let granted = if free == 0 { 0 } else { superfluid_executor::sizing::budgeted_cells(n_ctx, 0, kv_bytes_per_token, free).min(affordable) };
+    let within = format!(
+        "at most 8 GiB, and {:.0}% of the {:.1} GB free past a {:.1} GB headroom",
+        100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
+        free as f64 / 1e9,
+        headroom as f64 / 1e9
+    );
+    (granted, within)
+}
+
 struct OffloadMemory {
     backend: String,
     integrated: bool,
@@ -871,41 +897,15 @@ impl LlamaRuntime {
         let cache_exported_cells = if cfg.cache_exported_cells > 0 {
             cfg.cache_exported_cells as u64
         } else {
-            let affordable = EXPORT_BYTES / kv_bytes_per_token.max(1);
-            if cfg.n_gpu_layers == 0 {
-                let granted = (n_ctx as u64).min(affordable);
-                if granted < n_ctx as u64 {
-                    eprintln!(
-                        "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool (at most 8 GiB)",
-                        superfluid_executor::sizing::tokens(granted),
-                    );
-                }
-                granted
-            } else {
-                // Exports live in the memory the pool shares on unified-memory
-                // devices: they leave the headroom the pool was sized to leave.
-                let headroom = device.as_ref().map_or(0, |d| {
-                    superfluid_executor::sizing::headroom_bytes((superfluid_executor::sizing::PLANNING_SHARE * d.total as f64) as u64)
-                });
-                let free = device_free_bytes().saturating_sub(headroom);
-                // budgeted_cells reads 0 free bytes as unknown and grants all.
-                let granted = if free == 0 {
-                    0
-                } else {
-                    superfluid_executor::sizing::budgeted_cells(n_ctx as u64, 0, kv_bytes_per_token, free).min(affordable)
-                };
-                if granted < n_ctx as u64 {
-                    eprintln!(
-                        "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool \
-                         (at most 8 GiB, and {:.0}% of the {:.1} GB free past a {:.1} GB headroom)",
-                        superfluid_executor::sizing::tokens(granted),
-                        100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
-                        free as f64 / 1e9,
-                        headroom as f64 / 1e9,
-                    );
-                }
-                granted
+            let on_device = device.as_ref().map(|d| (device_free_bytes(), d.total));
+            let (granted, within) = export_budget(n_ctx as u64, kv_bytes_per_token, on_device);
+            if granted < n_ctx as u64 {
+                eprintln!(
+                    "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool ({within})",
+                    superfluid_executor::sizing::tokens(granted),
+                );
             }
+            granted
         };
         let desc = RuntimeDescriptor {
             runtime_id: "llamacpp".into(),
@@ -1657,6 +1657,22 @@ impl LlamaRuntime {
 
 #[cfg(test)]
 mod offload_device_tests {
+
+    #[test]
+    fn exports_on_the_cpu_keep_to_host_memory_alone() {
+        // A token costs 1 KiB, so 8 GiB holds 8 Mi cells.
+        let kib = 1024u64;
+        let (cells, within) = super::export_budget(4096, kib, None);
+        assert_eq!((cells, within.as_str()), (4096, "at most 8 GiB"), "on the CPU, by choice or for want of an accelerator: the pool's cells");
+        assert_eq!(super::export_budget(1 << 24, kib, None).0, 1 << 23, "within 8 GiB");
+        // On an accelerator the pool's share of the free memory past its headroom bounds
+        // them too, and no free memory grants nothing.
+        let (none, within) = super::export_budget(4096, kib, Some((0, 16 << 30)));
+        assert_eq!(none, 0, "{within}");
+        assert!(within.contains("free past a"), "{within}");
+        let (some, _) = super::export_budget(4096, kib, Some((8 << 30, 16 << 30)));
+        assert!(some > 0 && some <= 4096, "{some}");
+    }
     use super::{offload_device, sizes_here, sys};
 
     #[test]
