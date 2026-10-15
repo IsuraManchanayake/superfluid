@@ -9,11 +9,10 @@
 #   SUPERFLUID_PREFIX   where the `superfluid` command goes; default: ~/.local (its bin/)
 #   SUPERFLUID_HOME     where releases are kept, side by side; default: ~/.superfluid (versions/)
 #
-# Nothing runs as root. The release is unpacked under $SUPERFLUID_HOME/versions
-# and $SUPERFLUID_PREFIX/bin/superfluid links to it, so `superfluid self update`
-# can install the next release beside it and go back if needed. The baseRT
-# engine is installed where it runs (Apple silicon, Linux arm64 with CUDA);
-# llama.cpp and MLX install themselves the first time a model needs them.
+# Nothing runs as root. The release goes under $SUPERFLUID_HOME/versions, linked
+# from $SUPERFLUID_PREFIX/bin, so `superfluid self update` can install the next
+# one beside it. The baseRT engine is installed where it runs; llama.cpp and
+# MLX install themselves the first time a model needs them.
 set -eu
 
 REPO="basecompute/superfluid"
@@ -62,10 +61,8 @@ have="$(sha256 "$tmp/$name.tar.gz")"
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 chmod +x "$tmp/$name"/bin/superfluid* "$tmp/$name"/libexec/superfluid/superfluid-worker-*
-# The release places itself: under $SUPERFLUID_HOME/versions, with links in the
-# prefix. A release from before `self install` existed is placed by the
-# superfluid already installed when there is one that can, and copied in place
-# otherwise; never written through a link into the versions directory.
+# A release from before `self install` is placed by the installed superfluid
+# when there is one, else copied in place, never through a link.
 if "$tmp/$name/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin"; then
   :
 elif [ -L "$PREFIX/bin/superfluid" ] && "$PREFIX/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin"; then
