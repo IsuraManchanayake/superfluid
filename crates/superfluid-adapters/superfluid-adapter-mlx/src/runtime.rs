@@ -1169,8 +1169,9 @@ rt.seqs[1], rt.lens[1] = [C.CacheList(C.KVCache(), C.RotatingKVCache(max_size=64
 imported = rt.seq_import(1, payload)
 back = rt.seqs[1][0]
 kinds = int([type(c).__name__ for c in back.caches] == ['KVCache', 'RotatingKVCache'])
-same_meta = int(back.meta_state == both.meta_state)
-same_state = int(all(bool(mx.array_equal(a, b)) for (_, a), (_, b) in zip(shim.tree_flatten(back.state), shim.tree_flatten(both.state))))
+same_meta = int(getattr(back, 'meta_state', None) == getattr(both, 'meta_state', None))
+arrays = lambda c: [a for _, a in shim.tree_flatten(shim._live_state(c)) if isinstance(a, mx.array)]
+same_state = int(len(arrays(back)) == len(arrays(both)) and all(bool(mx.array_equal(a, b)) for a, b in zip(arrays(back), arrays(both))))
 flat = int(shim._meta_in({'kind': 'tuple', 'v': ['4', '64', '12', '12']}) == ('4', '64', '12', '12'))
 ",
             &["imported", "kinds", "same_meta", "same_state", "flat"],
