@@ -5,7 +5,7 @@ pub mod recipe;
 use std::path::Path;
 use std::sync::Arc;
 
-use superfluid_adapter_kit::install::{Host, Plan, Request};
+use superfluid_adapter_kit::install::{Candidate, Host, Plan, Request};
 use superfluid_adapter_kit::{Pull, PullOption};
 use superfluid_adapter_kit::{ring_specs_for, Device, Format, Loaded, Probe, Runtime, RuntimeInfo, Tokenizer, TokenizerSource, WorkerArgs};
 use superfluid_engine_ffi::{libbasert, FfiEngineConfig, NativeEngine, TokenizerHandle};
@@ -13,6 +13,19 @@ use superfluid_engine_ffi::{libbasert, FfiEngineConfig, NativeEngine, TokenizerH
 pub struct Basert;
 
 impl Runtime for Basert {
+    fn compat(&self) -> serde_json::Value {
+        // What this build drives: the header it was built against, the ABI
+        // number it checks and the line accepted without one; and the engines
+        // it installs on its own, with the number each states.
+        let abi = libbasert::abi_built_for();
+        serde_json::json!({
+            "basert_version": libbasert::BUILT_FOR,
+            "abi": abi,
+            "unnumbered_minor": abi.and_then(libbasert::unnumbered_minor_for),
+            "pinned_engines": recipe::pinned().iter().map(|p| serde_json::json!({"version": p.version, "abi": p.abi})).collect::<Vec<_>>(),
+        })
+    }
+
     fn info(&self) -> RuntimeInfo {
         RuntimeInfo {
             id: "basert",
@@ -41,7 +54,7 @@ impl Runtime for Basert {
 
     fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
         let lib = libbasert::load()?;
-        Ok(Probe { version: format!("{} ({})", lib.version, lib.path.display()), devices: devices() })
+        Ok(Probe { version: format!("{} ({})", lib.version, lib.path.display()), devices: devices(), abi: lib.abi.map(u64::from) })
     }
 
     fn reads(&self, path: &Path) -> Result<(), String> {
@@ -114,6 +127,12 @@ impl Runtime for Basert {
 
     fn plan(&self, req: &Request, host: &Host) -> Option<Result<Vec<Plan>, String>> {
         Some(recipe::plan(req, host))
+    }
+
+    fn versions(&self, host: &Host) -> Vec<Candidate> {
+        // The pins alone: `plan` consults the release listing when a pin
+        // fails, and a listing is answered offline.
+        recipe::versions(host)
     }
 }
 
