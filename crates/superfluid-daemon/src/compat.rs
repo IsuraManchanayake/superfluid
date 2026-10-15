@@ -7,21 +7,22 @@ use serde_json::{json, Map, Value};
 
 use crate::runtimes::Catalog;
 
-/// The declaration of every adapter this superfluid ships: the linked basert
+/// The declaration of every adapter this superfluid ships: each linked
 /// adapter answers in-process, each shipped worker answers `compat --json`.
 pub fn json(catalog: &Catalog) -> Value {
     let mut runtimes: Map<String, Value> = Map::new();
-    #[cfg(feature = "basert")]
-    {
-        use superfluid_adapter_kit::Runtime;
-        runtimes.insert("basert".into(), superfluid_adapter_basert::Basert.compat());
+    for rt in crate::linked::runtimes() {
+        runtimes.insert(rt.info().id.into(), rt.compat());
     }
     for id in catalog.shipped_ids() {
         if runtimes.contains_key(id.name()) {
             continue;
         }
         let Some(worker) = catalog.shipped(id) else { continue };
-        let answer = match Command::new(&worker).args(["compat", "--json"]).output() {
+        // The worker needs nothing of the caller's credentials to say what it was built for.
+        let mut cmd = Command::new(&worker);
+        crate::exec::without_secrets(&mut cmd).args(["compat", "--json"]);
+        let answer = match cmd.output() {
             Ok(out) if out.status.success() => serde_json::from_slice::<Value>(&out.stdout)
                 .unwrap_or_else(|e| json!({"error": format!("{}: compat is not JSON: {e}", worker.display())})),
             Ok(out) => json!({"error": format!("{} compat exited {}", worker.display(), out.status)}),
@@ -93,15 +94,22 @@ mod tests {
         std::fs::create_dir_all(&beside).unwrap();
         std::fs::create_dir_all(&libexec).unwrap();
         let toy = libexec.join("superfluid-worker-toyrt");
-        std::fs::write(&toy, "#!/bin/sh\n[ \"$1\" = compat ] || exit 2\necho '{\"tested\":[\"t2\",\"t1\"]}'\n").unwrap();
+        // The toy also tells whether a credential reached it.
+        std::fs::write(&toy, "#!/bin/sh\n[ \"$1\" = compat ] || exit 2\necho \"{\\\"tested\\\":[\\\"t2\\\",\\\"t1\\\"],\\\"saw\\\":\\\"${SUPERFLUID_COMPAT_SENTINEL_TOKEN:-}\\\"}\"\n").unwrap();
         std::fs::set_permissions(&toy, std::fs::Permissions::from_mode(0o755)).unwrap();
         let broken = libexec.join("superfluid-worker-oldrt");
         std::fs::write(&broken, "#!/bin/sh\nexit 2\n").unwrap();
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cat = Catalog::new(root.join("home"), Some(beside.clone()), beside.join("superfluid-workerd"));
+        std::env::set_var("SUPERFLUID_COMPAT_SENTINEL_TOKEN", "hunter2");
         let c = json(&cat);
+        std::env::remove_var("SUPERFLUID_COMPAT_SENTINEL_TOKEN");
         assert_eq!(c["superfluid"], env!("CARGO_PKG_VERSION"));
         assert_eq!(c["runtimes"]["toyrt"]["tested"][0], "t2");
+        assert_eq!(c["runtimes"]["toyrt"]["saw"], "", "a credential-named variable is not handed to the worker");
+        for id in crate::linked::ids() {
+            assert!(c["runtimes"][id.name()].is_object(), "the linked {} adapter answers in process: {c}", id.name());
+        }
         assert!(c["runtimes"]["oldrt"]["error"].as_str().unwrap().contains("exited"), "{c}");
         #[cfg(feature = "basert")]
         {
