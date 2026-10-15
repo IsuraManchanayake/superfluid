@@ -86,9 +86,12 @@ jobs:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
     steps:
       - uses: actions/checkout@v4
-      # A self-hosted runner keeps the toolchain it has.
+      # A self-hosted runner keeps the toolchain it has, where rustup puts it;
+      # its PATH does not say so unless its owner's shell did.
       - uses: dtolnay/rust-toolchain@stable
         if: runner.environment == 'github-hosted'
+      - if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
 
       - name: Build the worker and plan the untested install
