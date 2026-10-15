@@ -1,5 +1,4 @@
-//! `superfluid compat [--json]`: what this build was built and tested for,
-//! per runtime, as the release's `compat.json` carries it.
+//! `superfluid compat [--json]`: what this build was built and tested for, per runtime.
 
 use std::process::Command;
 
@@ -7,8 +6,7 @@ use serde_json::{json, Map, Value};
 
 use crate::runtimes::Catalog;
 
-/// The declaration of every adapter this superfluid ships: each linked
-/// adapter answers in-process, each shipped worker answers `compat --json`.
+/// Every adapter this build ships: a linked one in process, a shipped worker through `compat --json`.
 pub fn json(catalog: &Catalog) -> Value {
     let mut runtimes: Map<String, Value> = Map::new();
     for rt in crate::linked::runtimes() {
@@ -19,7 +17,6 @@ pub fn json(catalog: &Catalog) -> Value {
             continue;
         }
         let Some(worker) = catalog.shipped(id) else { continue };
-        // The worker needs nothing of the caller's credentials to say what it was built for.
         let mut cmd = Command::new(&worker);
         crate::exec::without_secrets(&mut cmd).args(["compat", "--json"]);
         let answer = match cmd.output() {
@@ -45,7 +42,7 @@ pub fn text(catalog: &Catalog) -> String {
         }
         let line = match id.as_str() {
             "basert" => {
-                let abi = r["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.3.1)".into());
+                let abi = r["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.4.0)".into());
                 let unnumbered = match r["unnumbered_minor"].as_str() {
                     Some(minor) => format!("one that states no number serves if it is baseRT {minor}.x"),
                     None => "one that states no number does not serve".to_string(),

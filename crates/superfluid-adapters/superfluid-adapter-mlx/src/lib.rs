@@ -76,8 +76,6 @@ impl Mlx {
 
 impl Runtime for Mlx {
     fn compat(&self) -> serde_json::Value {
-        // The MLX versions this adapter installs on its own, newest first,
-        // and the Python they run on.
         serde_json::json!({"tested": crate::recipe::tested(), "python": crate::recipe::python_version()})
     }
 

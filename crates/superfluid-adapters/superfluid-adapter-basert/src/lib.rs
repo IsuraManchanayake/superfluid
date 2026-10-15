@@ -14,9 +14,6 @@ pub struct Basert;
 
 impl Runtime for Basert {
     fn compat(&self) -> serde_json::Value {
-        // What this build drives: the header it was built against, the ABI
-        // number it checks and the line accepted without one; and the engines
-        // it installs on its own, with the number each states.
         let abi = libbasert::abi_built_for();
         serde_json::json!({
             "basert_version": libbasert::BUILT_FOR,
