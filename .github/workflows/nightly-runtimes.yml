@@ -169,7 +169,7 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "llamacpp: tested with $BUILD"
           git push -f origin "$branch"
-          p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it on macos-14 (Metal) and ubuntu-24.04 (CPU): $RUN"
+          p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it on Apple silicon (Metal) and ubuntu-24.04 (CPU): $RUN"
           p2="This adds the build to the adapter's recipe as a tested build, with the size and SHA-256 GitHub lists for each of its assets, so the next release installs it on its own. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
           body="$p1"$'\n\n'"$p2"
           gh pr create --base "$BASE" --head "$branch" --title "llamacpp: tested with $BUILD" --body "$body"
