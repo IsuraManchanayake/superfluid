@@ -189,7 +189,8 @@ pub struct llama_context_params {
 }
 
 /// `llama_context_params` as llama.cpp lays it out from b11642 on: one field,
-/// `moe_cache_size`, inserted before `embeddings`, which moves every field after it.
+/// `moe_cache_size`, inserted after `type_v` and before the abort callback, which
+/// moves every field after it by eight bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct llama_context_params_v2 {
@@ -219,10 +220,10 @@ pub struct llama_context_params_v2 {
     pub cb_eval_user_data: *mut c_void,
     pub type_k: ggml_type,
     pub type_v: ggml_type,
-    pub abort_callback: ggml_abort_callback,
-    pub abort_callback_data: *mut c_void,
     /// b11642 and later: device cache for experts kept in host memory, 0 = off.
     pub moe_cache_size: usize,
+    pub abort_callback: ggml_abort_callback,
+    pub abort_callback_data: *mut c_void,
     pub embeddings: bool,
     pub offload_kqv: bool,
     pub no_perf: bool,
@@ -775,6 +776,22 @@ mod tests {
         assert_eq!(std::mem::offset_of!(llama_context_params, samplers), 136);
         assert_eq!(std::mem::offset_of!(llama_context_params, n_samplers), 144);
         assert_eq!(std::mem::offset_of!(llama_context_params, ctx_other), 152);
+        // b11642's layout, as offsetof on its include/llama.h gives: moe_cache_size sits
+        // between type_v and the abort callback. The defaults cannot tell that order (all
+        // three are zero), so it is pinned here.
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, type_v), 108);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, moe_cache_size), 112);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, abort_callback), 120);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, abort_callback_data), 128);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, embeddings), 136);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, offload_kqv), 137);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, no_perf), 138);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, op_offload), 139);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, swa_full), 140);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, kv_unified), 141);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, samplers), 144);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, n_samplers), 152);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, ctx_other), 160);
         assert_eq!(std::mem::offset_of!(llama_batch, n_tokens), 0);
         assert_eq!(std::mem::offset_of!(llama_batch, token), 8);
         assert_eq!(std::mem::offset_of!(llama_batch, embd), 16);
@@ -826,7 +843,7 @@ mod tests {
         let (context, model) = (bytes_of(&c), bytes_of(&m));
         assert_eq!(context_layout_of(&context), Ok(ContextLayout::V1));
         assert_eq!(model_layout_differs(&model), None);
-        // b11642: the same defaults with moe_cache_size (0) before embeddings.
+        // b11642: the same defaults with moe_cache_size (0) after type_v.
         let at = std::mem::offset_of!(llama_context_params_v2, moe_cache_size);
         let mut b11642 = context.clone();
         b11642.splice(at..at, [0u8; 8]);
