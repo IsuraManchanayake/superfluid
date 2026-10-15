@@ -109,6 +109,7 @@ jobs:
           path: |
             dist/${{ steps.pack.outputs.name }}.tar.gz
             dist/${{ steps.pack.outputs.name }}.tar.gz.sha256
+            dist/${{ steps.pack.outputs.name }}.compat.json
 
   crates:
     # Each crate in dependency order, skipping the ones already published, so a
