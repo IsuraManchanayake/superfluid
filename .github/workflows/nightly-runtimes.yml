@@ -81,6 +81,8 @@ jobs:
 
       - name: Build the worker and plan the untested install
         id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
           plan=$(target/debug/superfluid-worker-llamacpp plan --version "$BUILD" --untested \
@@ -161,9 +163,14 @@ jobs:
         run: |
           set -euo pipefail
           title="llama.cpp $BUILD breaks the adapter"
-          open=$(gh issue list --search "in:title \"$title\"" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
-          if [ "$open" != 0 ]; then
-            echo "an issue for $BUILD is already open"
+          # One open issue per runtime: a later build that fails too is a comment on it, since
+          # the newest build is tested every night and the adapter may take days to catch up.
+          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          if [ -n "$existing" ]; then
+            number=${existing%% *}
+            case "$existing" in *"$title"*) echo "an issue for $BUILD is already open: #$number"; exit 0;; esac
+            gh issue comment "$number" --body "$BUILD fails too: $RUN"
+            echo "noted $BUILD on the open issue #$number"
             exit 0
           fi
           p1="The nightly job installed llama.cpp $BUILD untested and the adapter's tests did not pass on it: $RUN"
