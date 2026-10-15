@@ -139,12 +139,37 @@ def canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def pypi_wheel(name: str, version: str, file: str) -> dict:
-    """The size and SHA-256 PyPI lists for one wheel of a release."""
+MACOS_TAG = re.compile(r"-macosx_(\d+)_(\d+)_arm64\.whl$")
+# The oldest macOS the adapter runs on: a wheel built for it installs there and
+# on every later one, where a wheel built for the runner's own macOS would not.
+MACOS_FLOOR = (14, 0)
+
+
+def floored(file: str, files: list[str]) -> str:
+    """The wheel to pin for `file`: the same wheel built for the oldest macOS
+    at or above the floor that PyPI offers, since pip on a newer runner or
+    machine resolves the newest, which an older Mac cannot install."""
+    m = MACOS_TAG.search(file)
+    if not m:
+        return file
+    stem = file[: m.start()]
+    offered = []
+    for f in files:
+        fm = MACOS_TAG.search(f)
+        if fm and f[: fm.start()] == stem:
+            offered.append(((int(fm.group(1)), int(fm.group(2))), f))
+    at_or_above = sorted(v for v in offered if v[0] >= MACOS_FLOOR)
+    return at_or_above[0][1] if at_or_above else file
+
+
+def pypi_wheel(name: str, version: str, file: str) -> tuple[str, dict]:
+    """The wheel pinned for `file` (see `floored`) and the size and SHA-256 PyPI lists for it."""
     listing = fetch_json(PYPI_RELEASE.format(name=name, version=version))
-    for u in listing.get("urls", []):
+    urls = listing.get("urls", [])
+    file = floored(file, [u["filename"] for u in urls])
+    for u in urls:
         if u["filename"] == file:
-            return {"size": u["size"], "sha256": u["digests"]["sha256"]}
+            return file, {"size": u["size"], "sha256": u["digests"]["sha256"]}
     raise SystemExit(f"PyPI lists no {file} for {name} {version}")
 
 
@@ -168,11 +193,13 @@ def append_mlx(version: str, report_path: Path) -> None:
             raise SystemExit(f"the report resolved mlx {ver}, not {version}")
         if canonical(name) == "mlx-lm":
             mlx_lm = ver
-        pinned = pypi_wheel(canonical(name), ver, file)
+        pinned_file, pinned = pypi_wheel(canonical(name), ver, file)
         reported = item["download_info"].get("archive_info", {}).get("hashes", {}).get("sha256")
-        if reported and reported != pinned["sha256"]:
+        if pinned_file == file and reported and reported != pinned["sha256"]:
             raise SystemExit(f"{file}: the SHA-256 pip reported differs from the one PyPI lists")
-        wheels.append({"name": name, "version": ver, "file": file, "size": pinned["size"], "sha256": pinned["sha256"]})
+        if pinned_file != file:
+            print(f"note: {file} pinned as {pinned_file}, the same wheel built for macOS {MACOS_FLOOR[0]}", file=sys.stderr)
+        wheels.append({"name": name, "version": ver, "file": pinned_file, "size": pinned["size"], "sha256": pinned["sha256"]})
     if not any(canonical(w["name"]) == "mlx" for w in wheels) or mlx_lm is None:
         raise SystemExit("the report holds no mlx or no mlx-lm wheel")
     wheels.sort(key=lambda w: canonical(w["name"]))
