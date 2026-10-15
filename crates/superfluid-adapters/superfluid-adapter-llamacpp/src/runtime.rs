@@ -41,6 +41,31 @@ pub struct LlamaConfig {
     pub n_ubatch: u32,
     pub n_gpu_layers: i32,
     pub n_threads: i32,
+    /// Threads for prompt batches; `0` = as many as `n_threads`.
+    pub n_threads_batch: i32,
+    /// The device for the whole model under `LLAMA_SPLIT_MODE_NONE`, and for small tensors otherwise.
+    pub main_gpu: i32,
+    /// The share each device takes, one entry per device; empty = llama.cpp's even split.
+    pub tensor_split: Vec<f32>,
+    // `None` leaves llama.cpp's own default (see `options`).
+    pub split_mode: Option<sys::llama_split_mode>,
+    pub load_mode: Option<sys::llama_load_mode>,
+    pub lazy_mode: Option<sys::llama_lazy_mode>,
+    pub repack: Option<bool>,
+    pub flash_attn: Option<sys::llama_flash_attn_type>,
+    pub type_k: Option<sys::ggml_type>,
+    pub type_v: Option<sys::ggml_type>,
+    pub offload_kqv: Option<bool>,
+    pub op_offload: Option<bool>,
+    pub swa_full: Option<bool>,
+    pub rope_scaling: Option<sys::llama_rope_scaling_type>,
+    pub rope_freq_base: Option<f32>,
+    pub rope_freq_scale: Option<f32>,
+    pub yarn_ext_factor: Option<f32>,
+    pub yarn_attn_factor: Option<f32>,
+    pub yarn_beta_fast: Option<f32>,
+    pub yarn_beta_slow: Option<f32>,
+    pub yarn_orig_ctx: Option<u32>,
     pub streams: Option<bool>,
     /// Cells the prefix cache may keep in a shared pool, where every step attends over
     /// them: `0` = one lane's ceiling. Unbounded with a buffer per lane.
@@ -67,6 +92,27 @@ impl Default for LlamaConfig {
             n_ubatch: 512,
             n_gpu_layers: -1,
             n_threads: 0,
+            n_threads_batch: 0,
+            main_gpu: 0,
+            tensor_split: Vec::new(),
+            split_mode: None,
+            load_mode: None,
+            lazy_mode: None,
+            repack: None,
+            flash_attn: None,
+            type_k: None,
+            type_v: None,
+            offload_kqv: None,
+            op_offload: None,
+            swa_full: None,
+            rope_scaling: None,
+            rope_freq_base: None,
+            rope_freq_scale: None,
+            yarn_ext_factor: None,
+            yarn_attn_factor: None,
+            yarn_beta_fast: None,
+            yarn_beta_slow: None,
+            yarn_orig_ctx: None,
             streams: None,
             cache_resident_cells: 0,
             cache_exported_cells: 0,
@@ -537,10 +583,40 @@ impl LlamaRuntime {
         sys::clear_errors();
         // SAFETY: plain FFI initialization.
         unsafe { sys::llama_backend_init() };
-        // SAFETY: default params are plain data; load copies the path.
+        // llama.cpp reads one share per device it can use; a shorter list is padded with zeros.
+        let split: Vec<f32> = if cfg.tensor_split.is_empty() {
+            Vec::new()
+        } else {
+            // SAFETY: a constant query.
+            let most = unsafe { sys::llama_max_devices() };
+            if cfg.tensor_split.len() > most {
+                return Err(LlamaError::Load(format!("--tensor-split names {} devices; this llama.cpp takes at most {most}", cfg.tensor_split.len())));
+            }
+            let mut s = cfg.tensor_split.clone();
+            s.resize(most, 0.0);
+            s
+        };
+        // SAFETY: default params are plain data; load copies the path and reads the split
+        // while it runs, and `split` outlives the call.
         let model = unsafe {
             let mut mp = sys::llama_model_default_params();
             mp.n_gpu_layers = cfg.n_gpu_layers;
+            mp.main_gpu = cfg.main_gpu;
+            if let Some(m) = cfg.split_mode {
+                mp.split_mode = m;
+            }
+            if let Some(m) = cfg.load_mode {
+                mp.load_mode = m;
+            }
+            if let Some(m) = cfg.lazy_mode {
+                mp.lazy_mode = m;
+            }
+            if let Some(on) = cfg.repack {
+                mp.use_extra_bufts = on;
+            }
+            if !split.is_empty() {
+                mp.tensor_split = split.as_ptr();
+            }
             sys::llama_model_load_from_file(path.as_ptr(), mp)
         };
         if model.is_null() {
@@ -616,9 +692,51 @@ impl LlamaRuntime {
                 // its last (`step_rows`).
                 cp.n_outputs_max_per_seq = superfluid_executor::primitives::VERIFY_ROWS_MAX;
                 cp.n_threads = threads;
-                cp.n_threads_batch = threads;
+                cp.n_threads_batch = if cfg.n_threads_batch > 0 { cfg.n_threads_batch } else { threads };
                 cp.kv_unified = !streams;
                 cp.no_perf = true;
+                if let Some(t) = cfg.flash_attn {
+                    cp.flash_attn_type = t;
+                }
+                if let Some(t) = cfg.type_k {
+                    cp.type_k = t;
+                }
+                if let Some(t) = cfg.type_v {
+                    cp.type_v = t;
+                }
+                if let Some(on) = cfg.offload_kqv {
+                    cp.offload_kqv = on;
+                }
+                if let Some(on) = cfg.op_offload {
+                    cp.op_offload = on;
+                }
+                if let Some(on) = cfg.swa_full {
+                    cp.swa_full = on;
+                }
+                if let Some(t) = cfg.rope_scaling {
+                    cp.rope_scaling_type = t;
+                }
+                if let Some(f) = cfg.rope_freq_base {
+                    cp.rope_freq_base = f;
+                }
+                if let Some(f) = cfg.rope_freq_scale {
+                    cp.rope_freq_scale = f;
+                }
+                if let Some(f) = cfg.yarn_ext_factor {
+                    cp.yarn_ext_factor = f;
+                }
+                if let Some(f) = cfg.yarn_attn_factor {
+                    cp.yarn_attn_factor = f;
+                }
+                if let Some(f) = cfg.yarn_beta_fast {
+                    cp.yarn_beta_fast = f;
+                }
+                if let Some(f) = cfg.yarn_beta_slow {
+                    cp.yarn_beta_slow = f;
+                }
+                if let Some(n) = cfg.yarn_orig_ctx {
+                    cp.yarn_orig_ctx = n;
+                }
                 sys::llama_init_from_model(model, cp)
             };
             if ctx.is_null() {

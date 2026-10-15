@@ -98,6 +98,8 @@ pub struct Runtime {
     pub devices: Vec<Device>,
     pub tokenizer: Option<PathBuf>,
     pub pull: Option<Vec<(String, bool)>>,
+    /// The options it takes on `serve`, as `--<id>-<name> <value>` (see `runtime_options`).
+    pub options: Vec<superfluid_worker::check::OptionDecl>,
 }
 
 impl Runtime {
@@ -114,6 +116,10 @@ impl Runtime {
         if !matches!(self.static_capabilities().get("load", "kv_bits"), crate::capabilities::Cap::No(_)) {
             args.push("--kv-bits".to_string());
             args.push(kv_bits.to_string());
+        }
+        for (flag, value) in crate::runtime_options::for_runtime(self.id) {
+            args.push(flag);
+            args.push(value);
         }
         args
     }
@@ -652,6 +658,7 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
                 .map(|a| a.iter().filter_map(|o| Some((o["name"].as_str()?.to_string(), o["value"].as_bool().unwrap_or(false)))).collect())
                 .unwrap_or_default()
         }),
+        options: superfluid_worker::check::options_from(&report["options"]),
         worker,
     })
 }
@@ -743,6 +750,7 @@ pub(crate) mod tests {
             devices: Vec::new(),
             tokenizer: None,
             pull: None,
+            options: Vec::new(),
         };
         let model = Path::new("/m.gguf");
         let figures = r#"{"budget_bytes":34000000000,"weight_bytes":600000000,"kv_bytes_per_token":114688,"trained_context":40960}"#;

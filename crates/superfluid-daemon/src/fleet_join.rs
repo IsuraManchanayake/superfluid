@@ -257,7 +257,8 @@ pub fn load_node(
             model: Some(path.clone()),
             max_context: ctx,
             max_batch: lanes,
-            ..Default::default()
+            extra: crate::runtime_options::for_runtime(runtime.id),
+                ..Default::default()
         };
         EngineHost::try_spawn_loaded(move || rt.open(&args))
     }
