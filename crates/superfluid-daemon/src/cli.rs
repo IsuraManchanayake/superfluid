@@ -29,6 +29,7 @@ pub const SERVE: &[Group] = &[
             f("--runtime", Some("<id>[@<install>]|<model>=<id>"), "by format", "The runtime to serve with (basert, llamacpp, mlx); `auto` clears a pick."),
             f("--offline", None, "", "Fetch nothing: a model id is only looked for in its runtime's cache."),
             f("--pull-<name>", Some("[value]"), "", "An option for the runtime that pulls a model id (e.g. --pull-file, --pull-revision)."),
+            f("--<runtime>-<name>", Some("<value>"), "", "A knob of that runtime, e.g. --llamacpp-n-gpu-layers 20; `superfluid runtime options <id>` lists them."),
             f("--model-dir", Some("<dir>"), "", "Every model in this directory is listed and loaded on first use."),
             f("--idle-timeout", Some("<sec>"), "0 (never)", "Unload a model that has been idle this long (never the default model)."),
             f("--basert-lib", Some("<path>"), "search", "Where libbaseRT is, for the basert runtime."),
@@ -322,7 +323,8 @@ Examples:
   superfluid serve ./Qwen3-4B-Q4_K_M.gguf --port 8000 --api-key secret
   superfluid serve --model a.gguf --model b.gguf --max-batch 16
 
-Every option that takes a value accepts --flag value and --flag=value.
+Every option that takes a value accepts --flag value and --flag=value. A runtime's own knobs are
+--<runtime>-<name> <value>; `superfluid runtime options <id>` lists them.
 ",
     );
     for g in SERVE {
@@ -372,8 +374,9 @@ pub const RUNTIMES_HELP: &str = "List the inference runtimes here, or which one 
 
 Usage: superfluid runtimes [<model>] [--json]
 
-  With no model: one row per runtime and install, its state, version, the formats it reads and
-  its device, then what to do about any that is not ready.
+  With no model: one row per runtime and install, its state, version, the newest version its
+  adapter installs on its own here (INSTALLABLE; `superfluid runtime versions <id>` lists them
+  all), the formats it reads and its device, then what to do about any that is not ready.
   With a model: which runtime reads it and what that runtime serves and refuses (exit 1 if none).
 
 Options:
@@ -383,11 +386,14 @@ Options:
 pub const RUNTIME_HELP: &str = "Install and manage inference runtimes.
 
 Usage:
+  superfluid runtime versions <id> [--json]     List the versions the adapter installs on its own: which install
+                                                here, as what, and which are installed
   superfluid runtime install <id> [options]     Fetch and install a runtime for this machine
   superfluid runtime update <id>                Install the newest tested build beside the current one
   superfluid runtime repair <id> [<install>]    Reinstall an install in place
   superfluid runtime remove <id> [<install>]    Remove one install, or all of them
   superfluid runtime use <id> <install>|--auto  Pin the default install, or go back to the best-ranked
+  superfluid runtime options <id> [--json]      The knobs it takes on `serve`, as --<id>-<name> <value>
 
   <id> is basert, llamacpp or mlx. Installs live under $SUPERFLUID_HOME/runtimes (~/.superfluid).
 
@@ -400,6 +406,7 @@ Install options:
   --dry-run              Print the plan and stop
 
 Examples:
+  superfluid runtime versions llamacpp
   superfluid runtime install llamacpp
   superfluid runtime install llamacpp --backend vulkan --dry-run
 ";
@@ -463,56 +470,23 @@ pub fn command_help(command: &str) -> Option<String> {
 pub const COMMANDS: &[&str] =
     &["serve", "launch", "stop", "runtimes", "runtime", "compat", "self", "session", "media", "top", "fleet", "node", "help", "version"];
 
-pub const COMPAT_HELP: &str = "What this build was built for: the runtime contracts it checks at load.
+pub const COMPAT_HELP: &str = "What this build was built and tested for, per runtime.
 
 Usage: superfluid compat [--json]
 
-  basert: the baseRT header version this build carries and the engine ABI number it checks.
-  A libbaseRT with the same ABI number serves, whatever its version; one that states no
-  number (0.3.0 and older) serves if it is of the line that carried this ABI before it was
-  numbered, 0.3.x. A release carries the same data beside its tarball, as compat.json, so a
-  host can choose a release before downloading it.
+  basert: the baseRT header version this build carries, the engine ABI number it checks and
+  the line accepted without one (0.3.x), and the engines it installs on its own. A libbaseRT
+  with the same ABI number serves, whatever its version.
+  llamacpp, mlx: the runtime versions each shipped adapter installs on its own, the ones it
+  was built and tested against (`--untested` installs another).
+  A release carries the same data beside its tarball, as compat.json, so a host can choose a
+  release before downloading it. `superfluid runtime versions <id>` lists one runtime's versions
+  with which install on this machine.
 
 Options:
   --json    Print JSON
 ";
 
-/// `superfluid compat --json`: what this build was built for, per runtime.
-pub fn compat_json() -> serde_json::Value {
-    #[allow(unused_mut)] // a build without the basert adapter inserts nothing
-    let mut runtimes = serde_json::Map::new();
-    #[cfg(feature = "basert")]
-    runtimes.insert(
-        "basert".into(),
-        serde_json::json!({
-            "basert_version": superfluid_engine_ffi::libbasert::BUILT_FOR,
-            "abi": superfluid_engine_ffi::libbasert::abi_built_for(),
-            "unnumbered_minor": superfluid_engine_ffi::libbasert::abi_built_for().and_then(superfluid_engine_ffi::libbasert::unnumbered_minor_for),
-        }),
-    );
-    serde_json::json!({"superfluid": env!("CARGO_PKG_VERSION"), "runtimes": runtimes})
-}
-
-/// `superfluid compat`, for a person.
-pub fn compat_text() -> String {
-    let mut out = format!("{}\n", version());
-    let c = compat_json();
-    match c["runtimes"].get("basert") {
-        Some(b) => {
-            let abi = b["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.4.0)".into());
-            let unnumbered = match b["unnumbered_minor"].as_str() {
-                Some(minor) => format!("one that states no number serves if it is baseRT {minor}.x"),
-                None => "one that states no number does not serve".to_string(),
-            };
-            out.push_str(&format!(
-                "basert: built against baseRT {} headers, {abi}. A libbaseRT with the same ABI number serves, whatever its version; {unnumbered}.\n",
-                b["basert_version"].as_str().unwrap_or("?"),
-            ));
-        }
-        None => out.push_str("basert: not in this build (no `basert` feature)\n"),
-    }
-    out
-}
 
 /// `$SUPERFLUID_HOME/sessions`.
 pub fn default_sessions(home: &Path) -> PathBuf {
