@@ -288,6 +288,9 @@ pub struct GenerateOutcome {
     pub warm_prefix: u64,
     pub logprobs: Vec<scheduler::TokenLogprob>,
     pub spec: (u64, u64),
+    /// Tokens decoded after the first one and the engine's decode time for
+    /// them in seconds, as the scheduler measured them tick by tick.
+    pub decode: (u64, f64),
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -3109,6 +3112,7 @@ impl Daemon {
                     warm_prefix: 0,
                     logprobs: Vec::new(),
                     spec: (0, 0),
+                    decode: (0, 0.0),
                 });
             }
             if !active.insert(session) {
@@ -3190,13 +3194,14 @@ impl Daemon {
             on_delta,
         );
         match result {
-            Ok((events, tokens_generated, finish, warm_prefix, logprobs, spec)) => Ok(GenerateOutcome {
+            Ok((events, tokens_generated, finish, warm_prefix, logprobs, spec, decode)) => Ok(GenerateOutcome {
                 events,
                 tokens_generated,
                 finish,
                 warm_prefix,
                 logprobs,
                 spec,
+                decode,
             }),
             Err(e) => {
                 self.active.lock().expect("active set").remove(&session);

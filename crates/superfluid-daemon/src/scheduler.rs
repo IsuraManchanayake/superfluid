@@ -186,6 +186,7 @@ pub struct LaneCarry {
     tool_buf: String,
     produced_before: u32,
     spec_before: (u64, u64),
+    decode_before: (u64, f64),
     warm_prefix_first: Option<u64>,
 }
 
@@ -207,6 +208,9 @@ pub enum LaneEvent {
         finish: u32,
         warm_prefix: u64,
         spec: (u64, u64),
+        /// Tokens decoded after the first one and the engine time spent on
+        /// them, from each tick's own decode timing (see `Lane::decode`).
+        decode: (u64, f64),
     },
     Failed(String),
 }
@@ -332,6 +336,11 @@ struct Lane {
     turn_kept: bool,
     produced_before: u32,
     spec: (u64, u64),
+    /// Tokens this request decoded after its first one, and the engine's
+    /// decode time for them: each tick's decode time shared by the rounds the
+    /// lane ran. The first token comes from the prefill's logits, so neither
+    /// counts it; ticks without a decode timing add nothing.
+    decode: (u64, f64),
     disp_tokens: u32,
     warm_prefix_first: Option<u64>,
     admitted_at: std::time::Instant,
@@ -2276,6 +2285,7 @@ impl Scheduler {
                 continue;
             }
             let spec_before = job.carry.as_ref().map(|c| c.spec_before).unwrap_or_default();
+            let decode_before = job.carry.as_ref().map(|c| c.decode_before).unwrap_or_default();
             let (seg, utf8, disp_seg, disp_utf8, tool_buf, produced_before, warm_prefix_first) =
                 match job.carry.take() {
                     Some(c) => (
@@ -2339,6 +2349,7 @@ impl Scheduler {
                 produced_before,
                 disp_tokens: produced_before,
                 spec: spec_before,
+                decode: decode_before,
                 warm_prefix_first,
                 admitted_at: std::time::Instant::now(),
                 ttft_observed: false,
@@ -3166,6 +3177,7 @@ impl Scheduler {
                         finish: lane.fin,
                         warm_prefix: lane.warm_prefix,
                         spec: lane.spec,
+                        decode: lane.decode,
                     });
                     locally_retired.push(lane.session);
                     false
@@ -3672,6 +3684,25 @@ impl Scheduler {
             .map(|e| e.n_tokens.saturating_sub(e.spec.accepted).max(1))
             .max()
             .unwrap_or(0);
+        // A lane whose prefill ended in this tick takes its first token from
+        // the prefill's logits, not from a decode round: a tick that only
+        // finished prompts ran no decode round at all.
+        let first_from_prefill: HashSet<u64> = self
+            .lanes
+            .iter()
+            .filter(|l| l.produced == 0 && prefill_by_tag.contains_key(&l.tag))
+            .map(|l| l.tag)
+            .collect();
+        let decode_rounds_of: HashMap<u64, u32> = ev
+            .emits
+            .iter()
+            .filter(|e| e.n_tokens > 0)
+            .map(|e| {
+                let rounds = e.n_tokens.saturating_sub(e.spec.accepted).max(1);
+                (e.lane_tag, rounds - u32::from(first_from_prefill.contains(&e.lane_tag)))
+            })
+            .collect();
+        let tick_decode_rounds: Option<u32> = decode_rounds_of.values().copied().max();
         self.stats
             .prefill_tokens
             .fetch_add(prefill_tokens_ran as u64, Ordering::Relaxed);
@@ -3679,12 +3710,25 @@ impl Scheduler {
         let (prefill_secs_meas, decode_secs_meas) = if phase_split {
             (ev.timings.prefill_ns as f64 / 1e9, ev.timings.decode_ns as f64 / 1e9)
         } else {
-            let decode_est = self.decode_round_secs.unwrap_or(0.0) * tick_rounds_exec as f64;
+            let decode_est = self.decode_round_secs.unwrap_or(0.0) * tick_decode_rounds.unwrap_or(0) as f64;
             ((tick_secs - decode_est).max(1e-3), decode_est)
         };
         // A tick the daemon ended early ran fewer steps than planned: the
         // rates are of what ran.
-        let decode_rounds_ran = if tick_rounds_exec > 0 { tick_rounds_exec.min(plan_decode_rounds) } else { plan_decode_rounds };
+        let decode_rounds_ran = match tick_decode_rounds {
+            Some(rounds) => rounds.min(plan_decode_rounds),
+            None => plan_decode_rounds,
+        };
+        // The decode time this tick measured: the engine's own when it timed
+        // the phases apart, the whole tick when it only decoded. A tick that
+        // ran prefill and decode under one timing measured none.
+        let tick_decode_secs: Option<f64> = if plan_prefill_tokens == 0 {
+            Some(if decode_secs_meas > 0.0 { decode_secs_meas } else { tick_secs })
+        } else if phase_split && decode_secs_meas > 0.0 {
+            Some(decode_secs_meas)
+        } else {
+            None
+        };
         if decode_rounds_ran > 0 && phase_split && decode_secs_meas > 0.0 {
             let sample = decode_secs_meas / decode_rounds_ran as f64;
             self.decode_round_secs = Some(match self.decode_round_secs {
@@ -3864,6 +3908,16 @@ impl Scheduler {
                 lane.phase = LanePhase::Finishing;
                 continue;
             }
+            if let (Some(secs), Some(&rounds), Some(all)) =
+                (tick_decode_secs, decode_rounds_of.get(&lane.tag), tick_decode_rounds)
+            {
+                if rounds > 0 && all > 0 {
+                    // The lane ran `rounds` of the tick's `all` decode rounds.
+                    let first = usize::from(first_from_prefill.contains(&lane.tag));
+                    lane.decode.0 += tokens.len().saturating_sub(first) as u64;
+                    lane.decode.1 += secs * rounds as f64 / all as f64;
+                }
+            }
             lane.all_tokens.extend_from_slice(&tokens);
             lane.produced += tokens.len() as u32;
             lane.fin = fin;
@@ -4021,6 +4075,7 @@ impl Scheduler {
                         tool_buf: lane.tool_buf,
                         produced_before: lane.produced_before + lane.produced,
                         spec_before: lane.spec,
+                        decode_before: lane.decode,
                         warm_prefix_first: Some(lane.warm_prefix_first.unwrap_or(lane.warm_prefix)),
                     });
                     requeue.push(job);
@@ -4038,6 +4093,7 @@ impl Scheduler {
                             finish: lane.fin,
                             warm_prefix: lane.warm_prefix_first.unwrap_or(lane.warm_prefix),
                             spec: lane.spec,
+                            decode: lane.decode,
                         });
                     }
                 }
@@ -4147,7 +4203,7 @@ pub fn run_completion_streaming(
     }
 }
 
-pub type RunJobResult = (Vec<CommittedEvent>, u32, u32, u64, Vec<TokenLogprob>, (u64, u64));
+pub type RunJobResult = (Vec<CommittedEvent>, u32, u32, u64, Vec<TokenLogprob>, (u64, u64), (u64, f64));
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_job(
@@ -4224,10 +4280,11 @@ pub fn run_job(
                 finish,
                 warm_prefix,
                 spec,
+                decode,
             }) => {
                 return match delivery_err {
                     Some(err) => Err(err),
-                    None => Ok((events, tokens_generated, finish, warm_prefix, logprobs, spec)),
+                    None => Ok((events, tokens_generated, finish, warm_prefix, logprobs, spec, decode)),
                 };
             }
             Ok(LaneEvent::Failed(msg)) => {

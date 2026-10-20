@@ -1109,6 +1109,8 @@ pub(crate) struct DecodeSpan {
     last_count: u64,
     tokens: u64,
     elapsed: std::time::Duration,
+    measured_tokens: u64,
+    measured_elapsed: std::time::Duration,
 }
 
 impl DecodeSpan {
@@ -1140,8 +1142,21 @@ impl DecodeSpan {
         self.last_count = 0;
     }
 
+    /// Adds a generation's decode as the scheduler measured it (tokens after
+    /// the first, engine seconds). Delivered events cannot time it: a tick
+    /// hands over all its tokens at once, the tick that ends a prompt also
+    /// decodes, and a channel change splits one tick into several events.
+    pub(crate) fn add_measured(&mut self, (tokens, secs): (u64, f64)) {
+        if tokens > 0 && secs > 0.0 {
+            self.measured_tokens += tokens;
+            self.measured_elapsed += std::time::Duration::from_secs_f64(secs);
+        }
+    }
+
     fn measured(&self) -> (u64, Option<std::time::Duration>) {
-        if self.elapsed == std::time::Duration::ZERO {
+        if self.measured_tokens > 0 {
+            (self.measured_tokens, Some(self.measured_elapsed))
+        } else if self.elapsed == std::time::Duration::ZERO {
             (0, None)
         } else {
             (self.tokens, Some(self.elapsed))
@@ -2020,6 +2035,39 @@ mod access_log_rate_tests {
         assert_eq!(decode_rate(200, Some(Duration::from_millis(150))), "-");
         assert_eq!(decode_rate(100, None), "-");
     }
+
+    #[test]
+    fn a_tick_split_by_a_channel_change_is_not_counted_against_the_next_tick() {
+        // Qwen3.6-35B-A3B, 128 tokens after a 4096-token prompt: the tick that
+        // ended the prompt also decoded and committed 19 text tokens, then 79
+        // reasoning tokens 9 ms later; the next tick added 30 in 0.79 s.
+        let base = std::time::Instant::now();
+        let mut d = DecodeSpan::default();
+        run(&mut d, base, &[(0, 19), (9, 98), (801, 128)]);
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "136.1", "delivered events overstate it");
+        d.add_measured((127, 127.0 * 0.0265));
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "37.7");
+    }
+
+    #[test]
+    fn a_generation_delivered_in_one_tick_still_has_a_decode_rate() {
+        let base = std::time::Instant::now();
+        let mut d = DecodeSpan::default();
+        run(&mut d, base, &[(0, 128)]);
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "-");
+        d.add_measured((127, 3.368));
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "37.7");
+    }
+
+    #[test]
+    fn measured_decode_adds_up_over_choices_and_ignores_empty_ones() {
+        let mut d = DecodeSpan::default();
+        d.add_measured((63, 0.5));
+        d.add_measured((0, 0.0));
+        d.add_measured((63, 0.5));
+        assert_eq!(d.measured(), (126, Some(Duration::from_secs(1))));
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "126.0");
+    }
 }
 
 #[cfg(test)]
@@ -2246,6 +2294,7 @@ pub(crate) async fn completions(
         })?;
         let first_tok = decode.first_token();
         decode.finish();
+        decode.add_measured(out.decode);
         let c = collect(&out.events);
         let usage = usage(&daemon, session, out.tokens_generated, out.warm_prefix);
         access_log(
@@ -2497,6 +2546,7 @@ pub(crate) async fn chat(
             })?;
             ttft_first = ttft_first.or_else(|| decode.first_token());
             decode.finish();
+            decode.add_measured(out.decode);
             let mut c = collect(&out.events);
             claim_named_calls(&daemon, &mut c, &out.events, &choice);
             if choice.forces_call() {
@@ -2879,6 +2929,7 @@ async fn chat_stream(
             let (mut decode, stopped) = (st.decode, st.stopped);
             let first_tok = decode.first_token();
             decode.finish();
+            decode.add_measured(out.decode);
             let (content_acc, content_sent) = (st.content_acc.clone(), st.content_sent);
             drop(st);
             let mut c = collect(&out.events);
