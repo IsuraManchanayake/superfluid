@@ -16,7 +16,7 @@ A product can run superfluid as its server: start `superfluid serve` with its ow
 The engine library and superfluid must agree on the engine's C ABI. Since baseRT 0.4.0 the library states an ABI number (`baseRT_abi_version()`, the header's `BASERT_ABI_VERSION`), and superfluid is built against a header with the same macro. The rule superfluid applies when it opens the library:
 
 - Both sides state a number: they must be equal. The version numbers do not matter.
-- The library states none, which only 0.3.0 and older do: it serves if it is 0.3.x, the line that carried ABI 1 before the number existed. (A superfluid built against a header without the macro judges by major.minor, as before.)
+- The library states none, which only 0.3.x and older do: it serves if it is 0.3.x, the line that carried ABI 1 before the number existed. (A superfluid built against a header without the macro judges by major.minor, as before.)
 - In every case the library must export every function superfluid calls. A library of 0.4.0 or later is asked for its model configuration by size (`baseRT_get_config_into`), so the struct may grow between them; an older one is read by value and must lay the struct out as superfluid expects.
 
 A host asks superfluid for its verdict rather than working it out, with the same library it will serve with:
@@ -32,7 +32,7 @@ The `basert` row answers:
   "id": "basert",
   "state": "ready",
   "ready": true,
-  "version": "0.3.1 (/path/to/engine/libbaseRT.dylib)",
+  "version": "0.4.0 (/path/to/engine/libbaseRT.dylib)",
   "abi": 1,
   "requires": {"basert_version": "0.4.0", "basert_abi": 1, "basert_unnumbered_minor": "0.3"}
 }
@@ -45,11 +45,21 @@ The `basert` row answers:
 Each release carries `compat.json` beside its tarball (and inside it), the same data as `superfluid compat --json`:
 
 ```json
-{"superfluid": "0.1.3", "runtimes": {"basert": {"basert_version": "0.4.0", "abi": 1, "unnumbered_minor": "0.3"}}}
+{
+  "superfluid": "0.1.3",
+  "runtimes": {
+    "basert": {"basert_version": "0.4.0", "abi": 1, "unnumbered_minor": "0.3",
+               "pinned_engines": [{"version": "0.3.0", "abi": null}]},
+    "llamacpp": {"tested": ["b11284"]},
+    "mlx": {"tested": ["0.32.2"], "python": "3.12"}
+  }
+}
 ```
 
-A host that installs superfluid picks the newest release whose `runtimes.basert.abi` equals its engine's number; a superfluid release that states no number (0.1.2 and older) serves 0.3.x engines only. The verdict above remains the final word once the release is installed. The other direction works the same way: baseRT's releases carry the engine's number beside each bundle, as `basert-engine-abi-<N>.txt`, and `superfluid runtime install basert` picks the newest engine with this build's number, or a 0.3.x engine, from the release listing alone.
+Every adapter the release ships answers for its runtime: for llama.cpp and MLX, `tested` is the upstream versions the adapter was built and tested against, which `superfluid runtime install` installs on its own (another version only with `--untested`). For baseRT the same list is `pinned_engines`, each engine with the ABI number it states (`null` for a 0.3.x engine, from before the number existed): only the engines this build drives, so an engine pinned for `--untested` is not among them.
+
+A host that installs superfluid picks the newest release whose `runtimes.basert.abi` equals its engine's number (each release also carries that number in an asset name, `superfluid-basert-abi-<N>.txt`, so the listing alone says it); a superfluid release that states no number (0.1.2 and older) serves 0.3.x engines only. The verdict above remains the final word once the release is installed. The other direction works the same way: baseRT's releases carry the engine's number beside each bundle, as `basert-engine-abi-<N>.txt`, and `superfluid runtime install basert` picks the newest engine with this build's number, or a 0.3.x engine, from the release listing alone.
 
 ## Exit codes
 
-`superfluid serve` exits with 4 when the runtime for the model is not installed or cannot run here, which includes an engine library that is missing or of another ABI. A host can tell that from 2, a flag it got wrong, and from 1, a failure after the start. The full list is in the [command-line reference](cli.md#exit-codes).
+`superfluid serve` exits with 4 when the runtime for the model is not installed or cannot run here, which includes an engine library that is missing or of another ABI. A host can tell that from 2, a flag it got wrong, and from 1, a failure along the way: an install superfluid tried that failed, or anything after the start. The full list is in the [command-line reference](cli.md#exit-codes).
