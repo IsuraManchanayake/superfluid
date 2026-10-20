@@ -3,7 +3,8 @@ name: Release
 # A tag v* builds superfluid for each platform, lays it out as a release
 # (bin/ and libexec/superfluid/, where the daemon looks for the runtime
 # adapters it ships), and attaches one tarball per platform, with its
-# SHA-256, to a draft GitHub release. scripts/install.sh installs from it.
+# SHA-256, to a draft GitHub release. Its notes come from
+# docs/release-notes/<version>.md. scripts/install.sh installs from it.
 
 on:
   push:
@@ -160,5 +161,10 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --draft --verify-tag --title "superfluid $TAG" --generate-notes
+            notes="docs/release-notes/${TAG#v}.md"
+            if [ ! -s "$notes" ] || ! grep -q '[^[:space:]]' "$notes"; then
+              echo "::error file=$notes::Missing or empty release notes for $TAG"
+              exit 1
+            fi
+            gh release create "$TAG" dist/* --draft --verify-tag --title "superfluid $TAG" --notes-file "$notes"
           fi
