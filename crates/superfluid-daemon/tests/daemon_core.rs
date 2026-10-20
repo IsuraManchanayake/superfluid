@@ -218,23 +218,29 @@ fn native_api_round_trip() {
 }
 
 #[test]
-fn a_generation_reports_its_decode_from_the_engine_timings() {
-    // The tick that ends a prompt also decodes and hands its tokens over at
-    // once, so delivered events cannot time the decode: the scheduler adds up
-    // each request's share of the engine's per-tick decode time, without the
-    // first token (it comes from the prefill).
+fn a_generation_reports_its_decode_after_its_first_tick() {
+    // The tick that ends a prompt also decodes, and a tick hands its tokens
+    // over at once, as one or more events: the scheduler times a request's
+    // decode from the end of its first tick to the end of its last, over the
+    // tokens after the first tick.
     let dir = test_dir();
     let d = mock_daemon(&dir.join("wal.log"));
     let session = d.create(None, GenParams::default()).unwrap();
     d.append(session, None, (100..164).collect()).unwrap();
-    let out = d.generate(session, 24).unwrap();
-    assert_eq!(out.tokens_generated, 24);
+    let out = d.generate(session, 300).unwrap();
+    assert_eq!(out.tokens_generated, 300);
+    let per_tick: Vec<u64> = out
+        .events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::Generated { span, .. } if !span.is_empty() => Some(span.len() as u64),
+            _ => None,
+        })
+        .collect();
+    assert!(per_tick.len() > 1, "300 tokens take more than one tick: {per_tick:?}");
     let (tokens, secs) = out.decode;
-    assert_eq!(tokens, 23, "every token after the first");
-    // The mock engine charges DECODE_NS_PER_ROUND (2_344 ns) for each token it
-    // emits, the first one included.
-    let want = 24.0 * 2_344e-9;
-    assert!((secs - want).abs() < want * 0.01, "decode {secs} s, the mock charged {want} s");
+    assert_eq!(tokens, 300 - per_tick[0], "every token after the first tick");
+    assert!(secs > 0.0);
 }
 
 #[test]

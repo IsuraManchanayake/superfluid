@@ -1142,10 +1142,10 @@ impl DecodeSpan {
         self.last_count = 0;
     }
 
-    /// Adds a generation's decode as the scheduler measured it (tokens after
-    /// the first, engine seconds). Delivered events cannot time it: a tick
-    /// hands over all its tokens at once, the tick that ends a prompt also
-    /// decodes, and a channel change splits one tick into several events.
+    /// Adds a generation's decode as the scheduler timed it, tick end to tick
+    /// end. Events alone cannot: a tick hands over all of its tokens at once,
+    /// and a channel change splits one tick into several events, so the rest
+    /// of the first tick counted against the next one's time.
     pub(crate) fn add_measured(&mut self, (tokens, secs): (u64, f64)) {
         if tokens > 0 && secs > 0.0 {
             self.measured_tokens += tokens;
@@ -2044,19 +2044,18 @@ mod access_log_rate_tests {
         let base = std::time::Instant::now();
         let mut d = DecodeSpan::default();
         run(&mut d, base, &[(0, 19), (9, 98), (801, 128)]);
-        assert_eq!(decode_rate(d.measured().0, d.measured().1), "136.1", "delivered events overstate it");
-        d.add_measured((127, 127.0 * 0.0265));
-        assert_eq!(decode_rate(d.measured().0, d.measured().1), "37.7");
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "136.1", "events alone overstate it");
+        d.add_measured((30, 0.792));
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "37.9");
     }
 
     #[test]
-    fn a_generation_delivered_in_one_tick_still_has_a_decode_rate() {
+    fn a_generation_delivered_in_one_tick_has_no_decode_rate() {
         let base = std::time::Instant::now();
         let mut d = DecodeSpan::default();
         run(&mut d, base, &[(0, 128)]);
+        d.add_measured((0, 0.0));
         assert_eq!(decode_rate(d.measured().0, d.measured().1), "-");
-        d.add_measured((127, 3.368));
-        assert_eq!(decode_rate(d.measured().0, d.measured().1), "37.7");
     }
 
     #[test]

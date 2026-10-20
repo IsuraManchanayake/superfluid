@@ -288,8 +288,8 @@ pub struct GenerateOutcome {
     pub warm_prefix: u64,
     pub logprobs: Vec<scheduler::TokenLogprob>,
     pub spec: (u64, u64),
-    /// Tokens decoded after the first one and the engine's decode time for
-    /// them in seconds, as the scheduler measured them tick by tick.
+    /// Tokens decoded after the generation's first tick and the seconds they
+    /// took, tick end to tick end, as the scheduler delivered them.
     pub decode: (u64, f64),
 }
 
