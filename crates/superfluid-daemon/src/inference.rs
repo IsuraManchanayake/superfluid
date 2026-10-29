@@ -1111,6 +1111,9 @@ pub(crate) struct DecodeSpan {
     elapsed: std::time::Duration,
     measured_tokens: u64,
     measured_elapsed: std::time::Duration,
+    /// Whether the scheduler timed the generation: its figure then stands,
+    /// none included, and the events are not consulted.
+    scheduler_timed: bool,
 }
 
 impl DecodeSpan {
@@ -1145,8 +1148,11 @@ impl DecodeSpan {
     /// Adds a generation's decode as the scheduler timed it, tick end to tick
     /// end. Events alone cannot: a tick hands over all of its tokens at once,
     /// and a channel change splits one tick into several events, so the rest
-    /// of the first tick counted against the next one's time.
+    /// of the first tick counted against the next one's time. A generation
+    /// that ended in its first tick adds `(0, 0.0)`: it has no decode to time,
+    /// whatever the events of that tick say.
     pub(crate) fn add_measured(&mut self, (tokens, secs): (u64, f64)) {
+        self.scheduler_timed = true;
         if tokens > 0 && secs > 0.0 {
             self.measured_tokens += tokens;
             self.measured_elapsed += std::time::Duration::from_secs_f64(secs);
@@ -1154,8 +1160,11 @@ impl DecodeSpan {
     }
 
     fn measured(&self) -> (u64, Option<std::time::Duration>) {
-        if self.measured_tokens > 0 {
-            (self.measured_tokens, Some(self.measured_elapsed))
+        if self.scheduler_timed {
+            match self.measured_tokens {
+                0 => (0, None),
+                n => (n, Some(self.measured_elapsed)),
+            }
         } else if self.elapsed == std::time::Duration::ZERO {
             (0, None)
         } else {
@@ -2056,6 +2065,18 @@ mod access_log_rate_tests {
         run(&mut d, base, &[(0, 128)]);
         d.add_measured((0, 0.0));
         assert_eq!(decode_rate(d.measured().0, d.measured().1), "-");
+    }
+
+    #[test]
+    fn a_one_tick_generation_split_by_a_channel_change_has_no_decode_rate() {
+        // One tick's tokens committed as two events 9 ms apart: the events
+        // alone make a rate of the gap between them.
+        let base = std::time::Instant::now();
+        let mut d = DecodeSpan::default();
+        run(&mut d, base, &[(0, 19), (9, 20)]);
+        assert_eq!(decode_rate(d.measured().0, d.measured().1), "111.1", "events alone");
+        d.add_measured((0, 0.0));
+        assert_eq!(d.measured(), (0, None), "the scheduler saw no tick after the first");
     }
 
     #[test]
